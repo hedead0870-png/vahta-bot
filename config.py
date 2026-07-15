@@ -1,1 +1,1 @@
-TOKEN = "ВСТАВЬ_СЮДА_ТОКЕН_БОТА"
+TOKEN = 8762064694:AAG5dEd6mmI0z9iN692IARXAmTh7gA9Vyhs

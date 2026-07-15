@@ -1,1 +1,3 @@
-# vahta-bot
+aiogram==3.20.0
+aiohttp
+python-dotenv

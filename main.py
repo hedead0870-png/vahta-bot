@@ -1,7 +1,9 @@
 import telebot
+from telebot import apihelper
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from config import TOKEN
 
+apihelper.ENABLE_MIDDLEWARE = True
 bot = telebot.TeleBot(TOKEN)
 
 # Хранилище данных пользователей в памяти
@@ -44,6 +46,12 @@ def main_menu_markup():
         KeyboardButton('ℹ️ О проекте')
     )
     return markup
+
+# ── Логирование входящих сообщений ───────────────────────────
+
+@bot.middleware_handler(update_types=['message'])
+def log_message(bot_instance, message):
+    print(f"[LOG] chat_id={message.chat.id} | text={message.text!r}")
 
 # ── Главное меню ──────────────────────────────────────────────
 

@@ -1,7 +1,7 @@
 import telebot
 from telebot import apihelper
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
-from config import TOKEN
+from config import TOKEN, ADMIN_ID
 
 apihelper.ENABLE_MIDDLEWARE = True
 bot = telebot.TeleBot(TOKEN)
@@ -47,6 +47,7 @@ def main_menu_markup():
         KeyboardButton('🏢 Работодатель'),
         KeyboardButton('ℹ️ О проекте')
     )
+    markup.add(KeyboardButton('👨‍💼 Админ панель'))
     return markup
 
 # ── Логирование входящих сообщений ───────────────────────────
@@ -206,6 +207,21 @@ def delete_profile_yes(message):
 @bot.message_handler(func=lambda m: m.text == '❌ Нет, оставить')
 def delete_profile_no(message):
     bot.send_message(message.chat.id, "Анкета сохранена.", reply_markup=worker_menu_markup())
+
+# ── Админ панель ─────────────────────────────────────────────
+
+@bot.message_handler(func=lambda m: m.text == '👨‍💼 Админ панель')
+def admin_panel(message):
+    if message.chat.id != ADMIN_ID:
+        bot.send_message(message.chat.id, "🚫 Нет доступа.")
+        return
+    total_users = len(set(list(user_profiles.keys()) + list(user_states.keys())))
+    filled_profiles = sum(1 for p in user_profiles.values() if len(p) == len(STEPS))
+    bot.send_message(message.chat.id,
+        f"👨‍💼 *Админ панель*\n\n"
+        f"👥 Пользователей в памяти: {total_users}\n"
+        f"📋 Заполненных анкет: {filled_profiles}",
+        parse_mode="Markdown")
 
 # ── Прочие разделы ────────────────────────────────────────────
 

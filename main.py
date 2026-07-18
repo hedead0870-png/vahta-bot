@@ -10,6 +10,28 @@ bot = telebot.TeleBot(TOKEN)
 user_profiles = {}   # chat_id -> dict с данными анкеты
 user_states = {}     # chat_id -> текущий шаг анкеты
 
+# Хранилище вакансий работодателей
+vacancies = {}        # chat_id -> list of vacancy dicts
+vacancy_states = {}   # chat_id -> текущий шаг создания вакансии
+
+VAC_STEPS = ['profession', 'city', 'company', 'salary', 'schedule', 'contact']
+VAC_QUESTIONS = {
+    'profession': "1️⃣ Название профессии:",
+    'city':       "2️⃣ Город:",
+    'company':    "3️⃣ Компания / объект:",
+    'salary':     "4️⃣ Зарплата (руб/мес):",
+    'schedule':   "5️⃣ График вахты (например: 30/30, 60/30):",
+    'contact':    "6️⃣ Контакт для связи (телефон или @username):",
+}
+VAC_LABELS = {
+    'profession': 'Профессия',
+    'city':       'Город',
+    'company':    'Компания/объект',
+    'salary':     'Зарплата',
+    'schedule':   'График',
+    'contact':    'Контакт',
+}
+
 STEPS = ['name', 'phone', 'city', 'profession', 'experience', 'salary', 'shift']
 STEP_QUESTIONS = {
     'name':       "👤 Введите ваше имя:",
@@ -137,8 +159,13 @@ def cancel(message):
         user_states.pop(cid)
         user_profiles.pop(cid, None)
         bot.send_message(cid, "❌ Заполнение анкеты отменено.", reply_markup=worker_menu_markup())
+    elif cid in vacancy_states:
+        vacancy_states.pop(cid)
+        if vacancies.get(cid):
+            vacancies[cid].pop()
+        bot.send_message(cid, "❌ Создание вакансии отменено.", reply_markup=employer_menu_markup())
     else:
-        bot.send_message(cid, "Нечего отменять.", reply_markup=worker_menu_markup())
+        bot.send_message(cid, "Нечего отменять.", reply_markup=main_menu_markup())
 
 @bot.message_handler(func=lambda m: m.chat.id in user_states)
 def handle_questionnaire(message):
@@ -238,7 +265,34 @@ def employer(message):
 
 @bot.message_handler(func=lambda m: m.text == '➕ Добавить вакансию')
 def add_vacancy(message):
-    bot.send_message(message.chat.id, "➕ Раздел добавления вакансии — скоро будет доступен.")
+    cid = message.chat.id
+    vacancy_states[cid] = 0
+    vacancies.setdefault(cid, [])
+    vacancies[cid].append({})
+    bot.send_message(cid,
+        "📝 Создание вакансии. Можно отменить командой /cancel\n\n" + VAC_QUESTIONS['profession'],
+        reply_markup=ReplyKeyboardRemove())
+
+@bot.message_handler(func=lambda m: m.chat.id in vacancy_states)
+def handle_vacancy(message):
+    cid = message.chat.id
+    step_index = vacancy_states[cid]
+    step_key = VAC_STEPS[step_index]
+
+    vacancies[cid][-1][step_key] = message.text
+
+    next_index = step_index + 1
+    if next_index < len(VAC_STEPS):
+        vacancy_states[cid] = next_index
+        bot.send_message(cid, VAC_QUESTIONS[VAC_STEPS[next_index]])
+    else:
+        vacancy_states.pop(cid)
+        vac = vacancies[cid][-1]
+        lines = ["✅ *Вакансия создана!*\n"]
+        for key in VAC_STEPS:
+            lines.append(f"• {VAC_LABELS[key]}: {vac.get(key, '—')}")
+        bot.send_message(cid, "\n".join(lines), parse_mode="Markdown",
+                         reply_markup=employer_menu_markup())
 
 @bot.message_handler(func=lambda m: m.text == '📋 Мои вакансии')
 def my_vacancies(message):

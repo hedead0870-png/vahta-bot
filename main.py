@@ -36,6 +36,7 @@ def worker_menu_markup():
     markup.add(KeyboardButton('💰 Зарплата'), KeyboardButton('💸 Расходы'))
     markup.add(KeyboardButton('🔍 Найти работу'))
     markup.add(KeyboardButton('🗑 Удалить анкету'))
+    markup.add(KeyboardButton('📊 Отчёт'), KeyboardButton('❓ Помощь'))
     markup.add(KeyboardButton('🏠 Главное меню'))
     return markup
 
@@ -152,6 +153,37 @@ def handle_questionnaire(message):
         for step in STEPS:
             lines.append(f"• {STEP_LABELS[step]}: {profile.get(step, '—')}")
         bot.send_message(cid, "\n".join(lines), parse_mode="Markdown", reply_markup=worker_menu_markup())
+
+# ── Отчёт и помощь ───────────────────────────────────────────
+
+@bot.message_handler(func=lambda m: m.text == '📊 Отчёт')
+def report(message):
+    bot.send_message(message.chat.id,
+        "📊 Ваш отчёт:\n\n"
+        "💰 Доходы: 0\n"
+        "💸 Расходы: 0\n"
+        "📈 Баланс: 0")
+
+@bot.message_handler(func=lambda m: m.text == '❓ Помощь')
+def help_info(message):
+    bot.send_message(message.chat.id,
+        "❓ *Помощь по боту Вахта PRO*\n\n"
+        "🔍 *Ищу работу* — меню работника\n"
+        "👤 *Мои данные* — заполнить или просмотреть анкету\n"
+        "⛺ *Моя вахта* — информация о текущей вахте\n"
+        "💰 *Зарплата* — раздел учёта зарплаты\n"
+        "💸 *Расходы* — раздел учёта расходов\n"
+        "🔍 *Найти работу* — поиск вакансий\n"
+        "📊 *Отчёт* — финансовый отчёт\n"
+        "🗑 *Удалить анкету* — удалить сохранённый профиль\n"
+        "🏠 *Главное меню* — вернуться в начало\n\n"
+        "Команды:\n"
+        "/start — запустить бота\n"
+        "/shift — раздел вахты\n"
+        "/salary — раздел зарплаты\n"
+        "/expenses — раздел расходов\n"
+        "/cancel — отменить заполнение анкеты",
+        parse_mode="Markdown")
 
 # ── Удаление анкеты ──────────────────────────────────────────
 

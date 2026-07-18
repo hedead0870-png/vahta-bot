@@ -2,39 +2,17 @@ import telebot
 from telebot import apihelper
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton
 from config import TOKEN, ADMIN_ID
+import database as db
 
 apihelper.ENABLE_MIDDLEWARE = True
 bot = telebot.TeleBot(TOKEN)
+db.init_db()
 
-# Хранилище данных пользователей в памяти
-user_profiles = {}   # chat_id -> dict с данными анкеты
-user_states = {}     # chat_id -> текущий шаг анкеты
-
-# Хранилище вакансий работодателей
-vacancies = {}        # chat_id -> list of vacancy dicts
-vacancy_states = {}   # chat_id -> текущий шаг создания вакансии
-
-# Хранилище откликов
-# responses[employer_id][vac_index] = [worker_id, ...]
-responses = {}
-
-VAC_STEPS = ['profession', 'city', 'company', 'salary', 'schedule', 'contact']
-VAC_QUESTIONS = {
-    'profession': "1️⃣ Название профессии:",
-    'city':       "2️⃣ Город:",
-    'company':    "3️⃣ Компания / объект:",
-    'salary':     "4️⃣ Зарплата (руб/мес):",
-    'schedule':   "5️⃣ График вахты (например: 30/30, 60/30):",
-    'contact':    "6️⃣ Контакт для связи (телефон или @username):",
-}
-VAC_LABELS = {
-    'profession': 'Профессия',
-    'city':       'Город',
-    'company':    'Компания/объект',
-    'salary':     'Зарплата',
-    'schedule':   'График',
-    'contact':    'Контакт',
-}
+# Состояния (хранятся только в памяти — сбрасываются при рестарте)
+user_states = {}     # chat_id -> шаг анкеты работника
+user_temp = {}       # chat_id -> dict с данными анкеты в процессе заполнения
+vacancy_states = {}  # chat_id -> шаг создания вакансии
+vacancy_temp = {}    # chat_id -> dict с данными новой вакансии
 
 STEPS = ['name', 'phone', 'city', 'profession', 'experience', 'salary', 'shift']
 STEP_QUESTIONS = {
@@ -55,6 +33,26 @@ STEP_LABELS = {
     'salary':     'Зарплата',
     'shift':      'Срок вахты',
 }
+
+VAC_STEPS = ['profession', 'city', 'company', 'salary', 'schedule', 'contact']
+VAC_QUESTIONS = {
+    'profession': "1️⃣ Название профессии:",
+    'city':       "2️⃣ Город:",
+    'company':    "3️⃣ Компания / объект:",
+    'salary':     "4️⃣ Зарплата (руб/мес):",
+    'schedule':   "5️⃣ График вахты (например: 30/30, 60/30):",
+    'contact':    "6️⃣ Контакт для связи (телефон или @username):",
+}
+VAC_LABELS = {
+    'profession': 'Профессия',
+    'city':       'Город',
+    'company':    'Компания/объект',
+    'salary':     'Зарплата',
+    'schedule':   'График',
+    'contact':    'Контакт',
+}
+
+# ── Клавиатуры ────────────────────────────────────────────────
 
 def worker_menu_markup():
     markup = ReplyKeyboardMarkup(resize_keyboard=True)
@@ -83,7 +81,7 @@ def main_menu_markup():
     markup.add(KeyboardButton('👨‍💼 Админ панель'))
     return markup
 
-# ── Логирование входящих сообщений ───────────────────────────
+# ── Логирование ───────────────────────────────────────────────
 
 @bot.middleware_handler(update_types=['message'])
 def log_message(bot_instance, message):
@@ -126,28 +124,24 @@ def expenses(message):
 @bot.message_handler(func=lambda m: m.text == '🔍 Найти работу')
 def find_job(message):
     cid = message.chat.id
-    profile = user_profiles.get(cid)
+    profile = db.get_profile(cid)
     if not profile or not profile.get('city'):
         bot.send_message(cid, "⚠️ Сначала заполните раздел 👤 Мои данные.")
         return
-    worker_city = profile['city'].strip().lower()
-    found = []
-    for employer_id, employer_vacs in vacancies.items():
-        for vac_index, vac in enumerate(employer_vacs):
-            if vac.get('city', '').strip().lower() == worker_city:
-                found.append((employer_id, vac_index, vac))
+    worker_city = profile['city'].strip()
+    found = db.get_vacancies_by_city(worker_city)
     if not found:
-        bot.send_message(cid, f"🔍 Подходящих вакансий в городе «{profile['city']}» пока нет.")
+        bot.send_message(cid, f"🔍 Подходящих вакансий в городе «{worker_city}» пока нет.")
         return
-    bot.send_message(cid, f"🔍 Найдено вакансий в городе «{profile['city']}»: {len(found)}")
-    for i, (employer_id, vac_index, vac) in enumerate(found, start=1):
+    bot.send_message(cid, f"🔍 Найдено вакансий в городе «{worker_city}»: {len(found)}")
+    for i, vac in enumerate(found, start=1):
         lines = [f"📌 *Вакансия #{i}*\n"]
         for key in VAC_STEPS:
             lines.append(f"• {VAC_LABELS[key]}: {vac.get(key, '—')}")
         inline = InlineKeyboardMarkup()
         inline.add(InlineKeyboardButton(
             "📩 Откликнуться",
-            callback_data=f"apply:{employer_id}:{vac_index}"
+            callback_data=f"apply:{vac['employer_id']}:{vac['id']}"
         ))
         bot.send_message(cid, "\n".join(lines), parse_mode="Markdown", reply_markup=inline)
 
@@ -156,10 +150,9 @@ def find_job(message):
 @bot.message_handler(func=lambda m: m.text == '👤 Мои данные')
 def my_data(message):
     cid = message.chat.id
-    profile = user_profiles.get(cid)
+    profile = db.get_profile(cid)
     if profile:
-        # Показать заполненный профиль
-        lines = [f"👤 *Ваш профиль:*"]
+        lines = ["👤 *Ваш профиль:*"]
         for step in STEPS:
             lines.append(f"• {STEP_LABELS[step]}: {profile.get(step, '—')}")
         lines.append("\nНажмите *Изменить анкету*, чтобы заполнить заново.")
@@ -176,21 +169,20 @@ def edit_profile(message):
 
 def start_questionnaire(cid):
     user_states[cid] = 0
-    user_profiles[cid] = {}
-    bot.send_message(cid, "📝 Заполним вашу анкету! Можно отменить командой /cancel\n\n" + STEP_QUESTIONS['name'],
-                     reply_markup=ReplyKeyboardRemove())
+    user_temp[cid] = {}
+    bot.send_message(cid,
+        "📝 Заполним вашу анкету! Можно отменить командой /cancel\n\n" + STEP_QUESTIONS['name'],
+        reply_markup=ReplyKeyboardRemove())
 
 @bot.message_handler(commands=['cancel'])
 def cancel(message):
     cid = message.chat.id
     if cid in user_states:
         user_states.pop(cid)
-        user_profiles.pop(cid, None)
         bot.send_message(cid, "❌ Заполнение анкеты отменено.", reply_markup=worker_menu_markup())
     elif cid in vacancy_states:
         vacancy_states.pop(cid)
-        if vacancies.get(cid):
-            vacancies[cid].pop()
+        vacancy_temp.pop(cid, None)
         bot.send_message(cid, "❌ Создание вакансии отменено.", reply_markup=employer_menu_markup())
     else:
         bot.send_message(cid, "Нечего отменять.", reply_markup=main_menu_markup())
@@ -201,20 +193,19 @@ def handle_questionnaire(message):
     step_index = user_states[cid]
     step_key = STEPS[step_index]
 
-    user_profiles[cid][step_key] = message.text
+    user_temp.setdefault(cid, {})[step_key] = message.text
 
     next_index = step_index + 1
     if next_index < len(STEPS):
         user_states[cid] = next_index
-        next_key = STEPS[next_index]
-        bot.send_message(cid, STEP_QUESTIONS[next_key])
+        bot.send_message(cid, STEP_QUESTIONS[STEPS[next_index]])
     else:
-        # Анкета завершена
         user_states.pop(cid)
-        profile = user_profiles[cid]
+        data = user_temp.pop(cid, {})
+        db.save_profile(cid, data)
         lines = ["✅ *Анкета сохранена!*\n"]
         for step in STEPS:
-            lines.append(f"• {STEP_LABELS[step]}: {profile.get(step, '—')}")
+            lines.append(f"• {STEP_LABELS[step]}: {data.get(step, '—')}")
         bot.send_message(cid, "\n".join(lines), parse_mode="Markdown", reply_markup=worker_menu_markup())
 
 # ── Отчёт и помощь ───────────────────────────────────────────
@@ -253,7 +244,7 @@ def help_info(message):
 @bot.message_handler(func=lambda m: m.text == '🗑 Удалить анкету')
 def delete_profile_confirm(message):
     cid = message.chat.id
-    if not user_profiles.get(cid):
+    if not db.get_profile(cid):
         bot.send_message(cid, "У вас нет сохранённой анкеты.")
         return
     markup = ReplyKeyboardMarkup(resize_keyboard=True)
@@ -263,7 +254,7 @@ def delete_profile_confirm(message):
 @bot.message_handler(func=lambda m: m.text == '✅ Да, удалить')
 def delete_profile_yes(message):
     cid = message.chat.id
-    user_profiles.pop(cid, None)
+    db.delete_profile(cid)
     bot.send_message(cid, "🗑 Анкета удалена.", reply_markup=worker_menu_markup())
 
 @bot.message_handler(func=lambda m: m.text == '❌ Нет, оставить')
@@ -277,15 +268,14 @@ def admin_panel(message):
     if message.chat.id != ADMIN_ID:
         bot.send_message(message.chat.id, "🚫 Нет доступа.")
         return
-    total_users = len(set(list(user_profiles.keys()) + list(user_states.keys())))
-    filled_profiles = sum(1 for p in user_profiles.values() if len(p) == len(STEPS))
     bot.send_message(message.chat.id,
         f"👨‍💼 *Админ панель*\n\n"
-        f"👥 Пользователей в памяти: {total_users}\n"
-        f"📋 Заполненных анкет: {filled_profiles}",
+        f"👥 Пользователей в БД: {db.count_users()}\n"
+        f"📋 Заполненных анкет: {db.count_filled_profiles()}\n"
+        f"📌 Вакансий: {db.count_vacancies()}",
         parse_mode="Markdown")
 
-# ── Прочие разделы ────────────────────────────────────────────
+# ── Меню работодателя ─────────────────────────────────────────
 
 @bot.message_handler(func=lambda m: m.text == '🏢 Работодатель')
 def employer(message):
@@ -295,8 +285,7 @@ def employer(message):
 def add_vacancy(message):
     cid = message.chat.id
     vacancy_states[cid] = 0
-    vacancies.setdefault(cid, [])
-    vacancies[cid].append({})
+    vacancy_temp[cid] = {}
     bot.send_message(cid,
         "📝 Создание вакансии. Можно отменить командой /cancel\n\n" + VAC_QUESTIONS['profession'],
         reply_markup=ReplyKeyboardRemove())
@@ -306,8 +295,7 @@ def handle_vacancy(message):
     cid = message.chat.id
     step_index = vacancy_states[cid]
     step_key = VAC_STEPS[step_index]
-
-    vacancies[cid][-1][step_key] = message.text
+    vacancy_temp[cid][step_key] = message.text
 
     next_index = step_index + 1
     if next_index < len(VAC_STEPS):
@@ -315,17 +303,17 @@ def handle_vacancy(message):
         bot.send_message(cid, VAC_QUESTIONS[VAC_STEPS[next_index]])
     else:
         vacancy_states.pop(cid)
-        vac = vacancies[cid][-1]
+        data = vacancy_temp.pop(cid)
+        db.add_vacancy(cid, data)
         lines = ["✅ *Вакансия создана!*\n"]
         for key in VAC_STEPS:
-            lines.append(f"• {VAC_LABELS[key]}: {vac.get(key, '—')}")
-        bot.send_message(cid, "\n".join(lines), parse_mode="Markdown",
-                         reply_markup=employer_menu_markup())
+            lines.append(f"• {VAC_LABELS[key]}: {data.get(key, '—')}")
+        bot.send_message(cid, "\n".join(lines), parse_mode="Markdown", reply_markup=employer_menu_markup())
 
 @bot.message_handler(func=lambda m: m.text == '📋 Мои вакансии')
 def my_vacancies(message):
     cid = message.chat.id
-    vac_list = vacancies.get(cid, [])
+    vac_list = db.get_vacancies(cid)
     if not vac_list:
         bot.send_message(cid, "📋 У вас пока нет размещённых вакансий.")
         return
@@ -339,40 +327,44 @@ def my_vacancies(message):
 @bot.callback_query_handler(func=lambda call: call.data.startswith('apply:'))
 def handle_apply(call):
     worker_id = call.message.chat.id
-    _, employer_id_str, vac_index_str = call.data.split(':')
+    _, employer_id_str, vac_id_str = call.data.split(':')
     employer_id = int(employer_id_str)
-    vac_index = int(vac_index_str)
+    vac_id = int(vac_id_str)
 
-    responses.setdefault(employer_id, {}).setdefault(vac_index, [])
-    if worker_id in responses[employer_id][vac_index]:
+    added = db.add_response(worker_id, employer_id, vac_id)
+    if added:
+        bot.answer_callback_query(call.id, "✅ Отклик отправлен!")
+        bot.send_message(worker_id, "📩 Ваш отклик отправлен работодателю.")
+    else:
         bot.answer_callback_query(call.id, "Вы уже откликались на эту вакансию.")
-        return
-
-    responses[employer_id][vac_index].append(worker_id)
-    bot.answer_callback_query(call.id, "✅ Отклик отправлен!")
-    bot.send_message(worker_id, "📩 Ваш отклик отправлен работодателю.")
 
 @bot.message_handler(func=lambda m: m.text == '📩 Отклики')
 def employer_responses(message):
     cid = message.chat.id
-    employer_vacs = vacancies.get(cid, [])
-    if not employer_vacs:
+    vac_list = db.get_vacancies(cid)
+    if not vac_list:
         bot.send_message(cid, "У вас нет вакансий.")
         return
-    emp_responses = responses.get(cid, {})
+    resp_rows = db.get_responses_for_employer(cid)
+    # Группируем отклики по vac_id
+    resp_map = {}
+    for r in resp_rows:
+        resp_map.setdefault(r['vac_id'], []).append(r['worker_id'])
+
     has_any = False
-    for vac_index, vac in enumerate(employer_vacs):
-        worker_ids = emp_responses.get(vac_index, [])
+    for vac in vac_list:
+        worker_ids = resp_map.get(vac['id'], [])
         if not worker_ids:
             continue
         has_any = True
         lines = [f"📋 *{vac.get('profession', '—')}* ({vac.get('city', '—')}) — откликнулись: {len(worker_ids)}\n"]
         for w_id in worker_ids:
-            profile = user_profiles.get(w_id, {})
-            name = profile.get('name', '—')
-            phone = profile.get('phone', '—')
-            profession = profile.get('profession', '—')
-            lines.append(f"👤 {name} | {profession} | 📞 {phone}")
+            profile = db.get_profile(w_id) or {}
+            lines.append(
+                f"👤 {profile.get('name', '—')} | "
+                f"{profile.get('profession', '—')} | "
+                f"📞 {profile.get('phone', '—')}"
+            )
         bot.send_message(cid, "\n".join(lines), parse_mode="Markdown")
     if not has_any:
         bot.send_message(cid, "📩 Откликов пока нет.")
@@ -380,6 +372,8 @@ def employer_responses(message):
 @bot.message_handler(func=lambda m: m.text == '👥 Найти работников')
 def find_workers(message):
     bot.send_message(message.chat.id, "👥 Раздел поиска работников — скоро будет доступен.")
+
+# ── Прочие разделы ────────────────────────────────────────────
 
 @bot.message_handler(func=lambda m: m.text == 'ℹ️ О проекте')
 def about(message):

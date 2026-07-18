@@ -30,7 +30,8 @@ def init_db():
                 company     TEXT,
                 salary      TEXT,
                 schedule    TEXT,
-                contact     TEXT
+                contact     TEXT,
+                status      TEXT NOT NULL DEFAULT 'active'
             );
 
             CREATE TABLE IF NOT EXISTS responses (
@@ -40,7 +41,22 @@ def init_db():
                 vac_id      INTEGER NOT NULL,
                 UNIQUE(worker_id, vac_id)
             );
+
+            CREATE TABLE IF NOT EXISTS reviews (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                worker_id   INTEGER NOT NULL,
+                employer_id INTEGER NOT NULL,
+                vac_id      INTEGER NOT NULL,
+                rating      INTEGER NOT NULL CHECK(rating BETWEEN 1 AND 5),
+                text        TEXT,
+                created_at  TEXT DEFAULT (datetime('now')),
+                UNIQUE(worker_id, vac_id)
+            );
         """)
+        # Миграция: добавить status если таблица уже существует без него
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(vacancies)").fetchall()]
+        if 'status' not in cols:
+            conn.execute("ALTER TABLE vacancies ADD COLUMN status TEXT NOT NULL DEFAULT 'active'")
 
 # ── Профили работников ────────────────────────────────────────
 
@@ -92,9 +108,11 @@ def get_vacancies(employer_id):
         return [dict(r) for r in rows]
 
 def get_vacancies_by_city(city):
+    """Возвращает только активные вакансии в указанном городе."""
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT * FROM vacancies WHERE LOWER(city) = LOWER(?)", (city,)
+            "SELECT * FROM vacancies WHERE LOWER(city) = LOWER(?) AND status = 'active'",
+            (city,)
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -102,6 +120,11 @@ def get_vacancy_by_id(vac_id):
     with get_conn() as conn:
         row = conn.execute("SELECT * FROM vacancies WHERE id = ?", (vac_id,)).fetchone()
         return dict(row) if row else None
+
+def set_vacancy_status(vac_id, status):
+    """status: 'active' или 'closed'"""
+    with get_conn() as conn:
+        conn.execute("UPDATE vacancies SET status = ? WHERE id = ?", (status, vac_id))
 
 def count_vacancies():
     with get_conn() as conn:
@@ -128,3 +151,45 @@ def get_responses_for_employer(employer_id):
             "SELECT vac_id, worker_id FROM responses WHERE employer_id = ?", (employer_id,)
         ).fetchall()
         return [dict(r) for r in rows]
+
+# ── Отзывы ────────────────────────────────────────────────────
+
+def add_review(worker_id, employer_id, vac_id, rating, text):
+    """Возвращает True если отзыв добавлен, False если уже оставлял."""
+    try:
+        with get_conn() as conn:
+            conn.execute(
+                """INSERT INTO reviews (worker_id, employer_id, vac_id, rating, text)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (worker_id, employer_id, vac_id, rating, text)
+            )
+        return True
+    except sqlite3.IntegrityError:
+        return False
+
+def get_reviews_for_employer(employer_id):
+    """Возвращает все отзывы о работодателе."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM reviews WHERE employer_id = ? ORDER BY created_at DESC",
+            (employer_id,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+def get_employer_rating(employer_id):
+    """Возвращает (средний_рейтинг, количество_отзывов) или (None, 0)."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT AVG(rating) as avg_r, COUNT(*) as cnt FROM reviews WHERE employer_id = ?",
+            (employer_id,)
+        ).fetchone()
+        return (round(row['avg_r'], 1) if row['avg_r'] else None, row['cnt'])
+
+def has_reviewed(worker_id, vac_id):
+    """Проверяет, оставлял ли работник отзыв по этой вакансии."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT id FROM reviews WHERE worker_id = ? AND vac_id = ?",
+            (worker_id, vac_id)
+        ).fetchone()
+        return row is not None

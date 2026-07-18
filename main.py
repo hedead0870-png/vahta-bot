@@ -13,6 +13,10 @@ user_states = {}     # chat_id -> шаг анкеты работника
 user_temp = {}       # chat_id -> dict с данными анкеты в процессе заполнения
 vacancy_states = {}  # chat_id -> шаг создания вакансии
 vacancy_temp = {}    # chat_id -> dict с данными новой вакансии
+review_states = {}   # chat_id -> {'employer_id', 'vac_id', 'rating'} — ожидание текста отзыва
+
+STATUS_EMOJI = {'active': '🟢', 'closed': '🔴'}
+STATUS_LABEL = {'active': 'Активна', 'closed': 'Закрыта'}
 
 STEPS = ['name', 'phone', 'city', 'profession', 'experience', 'salary', 'shift']
 STEP_QUESTIONS = {
@@ -135,14 +139,17 @@ def find_job(message):
         return
     bot.send_message(cid, f"🔍 Найдено вакансий в городе «{worker_city}»: {len(found)}")
     for i, vac in enumerate(found, start=1):
+        avg, cnt = db.get_employer_rating(vac['employer_id'])
+        rating_str = f"⭐ {avg} ({cnt} отз.)" if avg else "Нет отзывов"
         lines = [f"📌 *Вакансия #{i}*\n"]
         for key in VAC_STEPS:
             lines.append(f"• {VAC_LABELS[key]}: {vac.get(key, '—')}")
-        inline = InlineKeyboardMarkup()
-        inline.add(InlineKeyboardButton(
-            "📩 Откликнуться",
-            callback_data=f"apply:{vac['employer_id']}:{vac['id']}"
-        ))
+        lines.append(f"• Рейтинг работодателя: {rating_str}")
+        inline = InlineKeyboardMarkup(row_width=2)
+        inline.add(
+            InlineKeyboardButton("📩 Откликнуться", callback_data=f"apply:{vac['employer_id']}:{vac['id']}"),
+            InlineKeyboardButton("⭐ Оставить отзыв", callback_data=f"review:{vac['employer_id']}:{vac['id']}")
+        )
         bot.send_message(cid, "\n".join(lines), parse_mode="Markdown", reply_markup=inline)
 
 # ── Анкета работника ──────────────────────────────────────────
@@ -318,10 +325,16 @@ def my_vacancies(message):
         bot.send_message(cid, "📋 У вас пока нет размещённых вакансий.")
         return
     for i, vac in enumerate(vac_list, start=1):
-        lines = [f"📋 *Вакансия #{i}*\n"]
+        status = vac.get('status', 'active')
+        emoji = STATUS_EMOJI[status]
+        label = STATUS_LABEL[status]
+        lines = [f"📋 *Вакансия #{i}* {emoji} {label}\n"]
         for key in VAC_STEPS:
             lines.append(f"• {VAC_LABELS[key]}: {vac.get(key, '—')}")
-        bot.send_message(cid, "\n".join(lines), parse_mode="Markdown")
+        toggle_label = "🔴 Закрыть" if status == 'active' else "🟢 Открыть"
+        inline = InlineKeyboardMarkup()
+        inline.add(InlineKeyboardButton(toggle_label, callback_data=f"toggle_vac:{vac['id']}"))
+        bot.send_message(cid, "\n".join(lines), parse_mode="Markdown", reply_markup=inline)
     bot.send_message(cid, f"Всего вакансий: {len(vac_list)}", reply_markup=employer_menu_markup())
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('apply:'))

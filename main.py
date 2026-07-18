@@ -16,9 +16,22 @@ def start(message):
 
 @bot.message_handler(func=lambda m: m.text == '🔍 Ищу работу')
 def looking_for_job(message):
-    bot.send_message(message.chat.id,
-        "🔍 Раздел «Ищу работу»\n\n"
-        "Здесь вы найдёте актуальные вакансии и сможете откликнуться на подходящие предложения.")
+    markup = ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.add(KeyboardButton('👤 Мои данные'), KeyboardButton('⛺ Моя вахта'))
+    markup.add(KeyboardButton('💰 Зарплата'), KeyboardButton('💸 Расходы'))
+    markup.add(KeyboardButton('🔍 Найти работу'))
+    markup.add(KeyboardButton('🏠 Главное меню'))
+    bot.send_message(message.chat.id, "🔍 Меню работника:", reply_markup=markup)
+
+@bot.message_handler(func=lambda m: m.text == '🏠 Главное меню')
+def main_menu(message):
+    markup = ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.add(
+        KeyboardButton('🔍 Ищу работу'),
+        KeyboardButton('🏢 Работодатель'),
+        KeyboardButton('ℹ️ О проекте')
+    )
+    bot.send_message(message.chat.id, "Главное меню:", reply_markup=markup)
 
 @bot.message_handler(func=lambda m: m.text == '🏢 Работодатель')
 def employer(message):

@@ -73,14 +73,17 @@ def looking_for_job(message):
     user_states.pop(message.chat.id, None)
     bot.send_message(message.chat.id, "🔍 Меню работника:", reply_markup=worker_menu_markup())
 
+@bot.message_handler(commands=['shift'])
 @bot.message_handler(func=lambda m: m.text == '⛺ Моя вахта')
 def my_shift(message):
     bot.send_message(message.chat.id, "⛺ Информация о текущей вахте")
 
+@bot.message_handler(commands=['salary'])
 @bot.message_handler(func=lambda m: m.text == '💰 Зарплата')
 def salary(message):
     bot.send_message(message.chat.id, "💰 Раздел зарплаты")
 
+@bot.message_handler(commands=['expenses'])
 @bot.message_handler(func=lambda m: m.text == '💸 Расходы')
 def expenses(message):
     bot.send_message(message.chat.id, "💸 Раздел расходов")

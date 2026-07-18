@@ -296,7 +296,17 @@ def handle_vacancy(message):
 
 @bot.message_handler(func=lambda m: m.text == '📋 Мои вакансии')
 def my_vacancies(message):
-    bot.send_message(message.chat.id, "📋 У вас пока нет размещённых вакансий.")
+    cid = message.chat.id
+    vac_list = vacancies.get(cid, [])
+    if not vac_list:
+        bot.send_message(cid, "📋 У вас пока нет размещённых вакансий.")
+        return
+    for i, vac in enumerate(vac_list, start=1):
+        lines = [f"📋 *Вакансия #{i}*\n"]
+        for key in VAC_STEPS:
+            lines.append(f"• {VAC_LABELS[key]}: {vac.get(key, '—')}")
+        bot.send_message(cid, "\n".join(lines), parse_mode="Markdown")
+    bot.send_message(cid, f"Всего вакансий: {len(vac_list)}", reply_markup=employer_menu_markup())
 
 @bot.message_handler(func=lambda m: m.text == '👥 Найти работников')
 def find_workers(message):

@@ -40,6 +40,13 @@ def worker_menu_markup():
     markup.add(KeyboardButton('🏠 Главное меню'))
     return markup
 
+def employer_menu_markup():
+    markup = ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.add(KeyboardButton('➕ Добавить вакансию'), KeyboardButton('📋 Мои вакансии'))
+    markup.add(KeyboardButton('👥 Найти работников'))
+    markup.add(KeyboardButton('🏠 Главное меню'))
+    return markup
+
 def main_menu_markup():
     markup = ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add(
@@ -227,9 +234,19 @@ def admin_panel(message):
 
 @bot.message_handler(func=lambda m: m.text == '🏢 Работодатель')
 def employer(message):
-    bot.send_message(message.chat.id,
-        "🏢 Раздел «Работодатель»\n\n"
-        "Здесь вы можете разместить вакансию и найти подходящих кандидатов.")
+    bot.send_message(message.chat.id, "🏢 Меню работодателя:", reply_markup=employer_menu_markup())
+
+@bot.message_handler(func=lambda m: m.text == '➕ Добавить вакансию')
+def add_vacancy(message):
+    bot.send_message(message.chat.id, "➕ Раздел добавления вакансии — скоро будет доступен.")
+
+@bot.message_handler(func=lambda m: m.text == '📋 Мои вакансии')
+def my_vacancies(message):
+    bot.send_message(message.chat.id, "📋 У вас пока нет размещённых вакансий.")
+
+@bot.message_handler(func=lambda m: m.text == '👥 Найти работников')
+def find_workers(message):
+    bot.send_message(message.chat.id, "👥 Раздел поиска работников — скоро будет доступен.")
 
 @bot.message_handler(func=lambda m: m.text == 'ℹ️ О проекте')
 def about(message):

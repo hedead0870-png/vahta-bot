@@ -1,6 +1,6 @@
 import telebot
 from telebot import apihelper
-from telebot.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+from telebot.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton
 from config import TOKEN, ADMIN_ID
 
 apihelper.ENABLE_MIDDLEWARE = True
@@ -13,6 +13,10 @@ user_states = {}     # chat_id -> текущий шаг анкеты
 # Хранилище вакансий работодателей
 vacancies = {}        # chat_id -> list of vacancy dicts
 vacancy_states = {}   # chat_id -> текущий шаг создания вакансии
+
+# Хранилище откликов
+# responses[employer_id][vac_index] = [worker_id, ...]
+responses = {}
 
 VAC_STEPS = ['profession', 'city', 'company', 'salary', 'schedule', 'contact']
 VAC_QUESTIONS = {
@@ -65,7 +69,7 @@ def worker_menu_markup():
 def employer_menu_markup():
     markup = ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add(KeyboardButton('➕ Добавить вакансию'), KeyboardButton('📋 Мои вакансии'))
-    markup.add(KeyboardButton('👥 Найти работников'))
+    markup.add(KeyboardButton('👥 Найти работников'), KeyboardButton('📩 Отклики'))
     markup.add(KeyboardButton('🏠 Главное меню'))
     return markup
 
@@ -128,19 +132,24 @@ def find_job(message):
         return
     worker_city = profile['city'].strip().lower()
     found = []
-    for employer_vacs in vacancies.values():
-        for vac in employer_vacs:
+    for employer_id, employer_vacs in vacancies.items():
+        for vac_index, vac in enumerate(employer_vacs):
             if vac.get('city', '').strip().lower() == worker_city:
-                found.append(vac)
+                found.append((employer_id, vac_index, vac))
     if not found:
         bot.send_message(cid, f"🔍 Подходящих вакансий в городе «{profile['city']}» пока нет.")
         return
     bot.send_message(cid, f"🔍 Найдено вакансий в городе «{profile['city']}»: {len(found)}")
-    for i, vac in enumerate(found, start=1):
+    for i, (employer_id, vac_index, vac) in enumerate(found, start=1):
         lines = [f"📌 *Вакансия #{i}*\n"]
         for key in VAC_STEPS:
             lines.append(f"• {VAC_LABELS[key]}: {vac.get(key, '—')}")
-        bot.send_message(cid, "\n".join(lines), parse_mode="Markdown")
+        inline = InlineKeyboardMarkup()
+        inline.add(InlineKeyboardButton(
+            "📩 Откликнуться",
+            callback_data=f"apply:{employer_id}:{vac_index}"
+        ))
+        bot.send_message(cid, "\n".join(lines), parse_mode="Markdown", reply_markup=inline)
 
 # ── Анкета работника ──────────────────────────────────────────
 
@@ -326,6 +335,47 @@ def my_vacancies(message):
             lines.append(f"• {VAC_LABELS[key]}: {vac.get(key, '—')}")
         bot.send_message(cid, "\n".join(lines), parse_mode="Markdown")
     bot.send_message(cid, f"Всего вакансий: {len(vac_list)}", reply_markup=employer_menu_markup())
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('apply:'))
+def handle_apply(call):
+    worker_id = call.message.chat.id
+    _, employer_id_str, vac_index_str = call.data.split(':')
+    employer_id = int(employer_id_str)
+    vac_index = int(vac_index_str)
+
+    responses.setdefault(employer_id, {}).setdefault(vac_index, [])
+    if worker_id in responses[employer_id][vac_index]:
+        bot.answer_callback_query(call.id, "Вы уже откликались на эту вакансию.")
+        return
+
+    responses[employer_id][vac_index].append(worker_id)
+    bot.answer_callback_query(call.id, "✅ Отклик отправлен!")
+    bot.send_message(worker_id, "📩 Ваш отклик отправлен работодателю.")
+
+@bot.message_handler(func=lambda m: m.text == '📩 Отклики')
+def employer_responses(message):
+    cid = message.chat.id
+    employer_vacs = vacancies.get(cid, [])
+    if not employer_vacs:
+        bot.send_message(cid, "У вас нет вакансий.")
+        return
+    emp_responses = responses.get(cid, {})
+    has_any = False
+    for vac_index, vac in enumerate(employer_vacs):
+        worker_ids = emp_responses.get(vac_index, [])
+        if not worker_ids:
+            continue
+        has_any = True
+        lines = [f"📋 *{vac.get('profession', '—')}* ({vac.get('city', '—')}) — откликнулись: {len(worker_ids)}\n"]
+        for w_id in worker_ids:
+            profile = user_profiles.get(w_id, {})
+            name = profile.get('name', '—')
+            phone = profile.get('phone', '—')
+            profession = profile.get('profession', '—')
+            lines.append(f"👤 {name} | {profession} | 📞 {phone}")
+        bot.send_message(cid, "\n".join(lines), parse_mode="Markdown")
+    if not has_any:
+        bot.send_message(cid, "📩 Откликов пока нет.")
 
 @bot.message_handler(func=lambda m: m.text == '👥 Найти работников')
 def find_workers(message):

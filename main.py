@@ -35,6 +35,7 @@ def worker_menu_markup():
     markup.add(KeyboardButton('👤 Мои данные'), KeyboardButton('⛺ Моя вахта'))
     markup.add(KeyboardButton('💰 Зарплата'), KeyboardButton('💸 Расходы'))
     markup.add(KeyboardButton('🔍 Найти работу'))
+    markup.add(KeyboardButton('🗑 Удалить анкету'))
     markup.add(KeyboardButton('🏠 Главное меню'))
     return markup
 
@@ -148,6 +149,28 @@ def handle_questionnaire(message):
         for step in STEPS:
             lines.append(f"• {STEP_LABELS[step]}: {profile.get(step, '—')}")
         bot.send_message(cid, "\n".join(lines), parse_mode="Markdown", reply_markup=worker_menu_markup())
+
+# ── Удаление анкеты ──────────────────────────────────────────
+
+@bot.message_handler(func=lambda m: m.text == '🗑 Удалить анкету')
+def delete_profile_confirm(message):
+    cid = message.chat.id
+    if not user_profiles.get(cid):
+        bot.send_message(cid, "У вас нет сохранённой анкеты.")
+        return
+    markup = ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.add(KeyboardButton('✅ Да, удалить'), KeyboardButton('❌ Нет, оставить'))
+    bot.send_message(cid, "⚠️ Вы уверены, что хотите удалить анкету?", reply_markup=markup)
+
+@bot.message_handler(func=lambda m: m.text == '✅ Да, удалить')
+def delete_profile_yes(message):
+    cid = message.chat.id
+    user_profiles.pop(cid, None)
+    bot.send_message(cid, "🗑 Анкета удалена.", reply_markup=worker_menu_markup())
+
+@bot.message_handler(func=lambda m: m.text == '❌ Нет, оставить')
+def delete_profile_no(message):
+    bot.send_message(message.chat.id, "Анкета сохранена.", reply_markup=worker_menu_markup())
 
 # ── Прочие разделы ────────────────────────────────────────────
 

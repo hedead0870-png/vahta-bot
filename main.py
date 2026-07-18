@@ -121,7 +121,26 @@ def expenses(message):
 
 @bot.message_handler(func=lambda m: m.text == '🔍 Найти работу')
 def find_job(message):
-    bot.send_message(message.chat.id, "🔍 Поиск вакансий")
+    cid = message.chat.id
+    profile = user_profiles.get(cid)
+    if not profile or not profile.get('city'):
+        bot.send_message(cid, "⚠️ Сначала заполните раздел 👤 Мои данные.")
+        return
+    worker_city = profile['city'].strip().lower()
+    found = []
+    for employer_vacs in vacancies.values():
+        for vac in employer_vacs:
+            if vac.get('city', '').strip().lower() == worker_city:
+                found.append(vac)
+    if not found:
+        bot.send_message(cid, f"🔍 Подходящих вакансий в городе «{profile['city']}» пока нет.")
+        return
+    bot.send_message(cid, f"🔍 Найдено вакансий в городе «{profile['city']}»: {len(found)}")
+    for i, vac in enumerate(found, start=1):
+        lines = [f"📌 *Вакансия #{i}*\n"]
+        for key in VAC_STEPS:
+            lines.append(f"• {VAC_LABELS[key]}: {vac.get(key, '—')}")
+        bot.send_message(cid, "\n".join(lines), parse_mode="Markdown")
 
 # ── Анкета работника ──────────────────────────────────────────
 

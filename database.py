@@ -61,6 +61,14 @@ def init_db():
                 created_at  TEXT DEFAULT (datetime('now')),
                 UNIQUE(user_id, profession, city)
             );
+
+            CREATE TABLE IF NOT EXISTS sessions (
+                chat_id    INTEGER NOT NULL,
+                key        TEXT    NOT NULL,
+                value      TEXT    NOT NULL,
+                updated_at TEXT    DEFAULT (datetime('now')),
+                PRIMARY KEY(chat_id, key)
+            );
         """)
         # Миграции: добавить колонки если таблица уже существует без них
         cols = [r[1] for r in conn.execute("PRAGMA table_info(vacancies)").fetchall()]
@@ -307,6 +315,44 @@ def delete_all_subscriptions(user_id):
     """Удаляет все подписки пользователя."""
     with get_conn() as conn:
         conn.execute("DELETE FROM subscriptions WHERE user_id = ?", (user_id,))
+
+# ── Сессии (промежуточные состояния диалогов) ────────────────
+
+def set_session(chat_id, key, value):
+    """Сохраняет произвольное значение (JSON-сериализуемое) для chat_id+key."""
+    import json
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT OR REPLACE INTO sessions (chat_id, key, value, updated_at)
+               VALUES (?, ?, ?, datetime('now'))""",
+            (chat_id, key, json.dumps(value, ensure_ascii=False))
+        )
+
+def get_session(chat_id, key, default=None):
+    """Возвращает сохранённое значение или default."""
+    import json
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT value FROM sessions WHERE chat_id = ? AND key = ?", (chat_id, key)
+        ).fetchone()
+        return json.loads(row[0]) if row else default
+
+def del_session(chat_id, key):
+    """Удаляет запись сессии."""
+    with get_conn() as conn:
+        conn.execute("DELETE FROM sessions WHERE chat_id = ? AND key = ?", (chat_id, key))
+
+def has_session(chat_id, key):
+    """Проверяет наличие записи сессии."""
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT 1 FROM sessions WHERE chat_id = ? AND key = ?", (chat_id, key)
+        ).fetchone() is not None
+
+def del_all_sessions(chat_id):
+    """Удаляет все сессии пользователя (при сбросе состояния)."""
+    with get_conn() as conn:
+        conn.execute("DELETE FROM sessions WHERE chat_id = ?", (chat_id,))
 
 def find_matching_subscribers(profession, city):
     """Возвращает user_id всех подписчиков, которым подходит вакансия.

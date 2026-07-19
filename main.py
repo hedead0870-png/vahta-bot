@@ -8,15 +8,55 @@ apihelper.ENABLE_MIDDLEWARE = True
 bot = telebot.TeleBot(TOKEN)
 db.init_db()
 
-# Состояния (хранятся только в памяти — сбрасываются при рестарте)
-user_states = {}     # chat_id -> шаг анкеты работника
-user_temp = {}       # chat_id -> dict с данными анкеты в процессе заполнения
-vacancy_states = {}  # chat_id -> шаг создания вакансии
-vacancy_temp = {}    # chat_id -> dict с данными новой вакансии
-review_states = {}   # chat_id -> {'employer_id', 'vac_id', 'rating'} — ожидание текста отзыва
-search_states = {}   # chat_id -> {'step': 'profession'|'city', 'profession': str}
-search_results = {}  # chat_id -> {'vacancies': [...], 'index': int}
-sub_states = {}      # chat_id -> {'step': 'profession'|'city', 'profession': str}
+
+class PersistentDict:
+    """Словарь, прозрачно сохраняющий состояния в SQLite (таблица sessions).
+    При перезапуске бота данные не теряются.
+    """
+    def __init__(self, key_prefix: str):
+        self._prefix = key_prefix
+
+    def __setitem__(self, chat_id, value):
+        db.set_session(chat_id, self._prefix, value)
+
+    def __getitem__(self, chat_id):
+        val = db.get_session(chat_id, self._prefix)
+        if val is None:
+            raise KeyError(chat_id)
+        return val
+
+    def __contains__(self, chat_id):
+        return db.has_session(chat_id, self._prefix)
+
+    def get(self, chat_id, default=None):
+        return db.get_session(chat_id, self._prefix, default)
+
+    def pop(self, chat_id, *args):
+        val = db.get_session(chat_id, self._prefix)
+        if val is None:
+            if args:
+                return args[0]
+            raise KeyError(chat_id)
+        db.del_session(chat_id, self._prefix)
+        return val
+
+    def setdefault(self, chat_id, default=None):
+        val = db.get_session(chat_id, self._prefix)
+        if val is None:
+            db.set_session(chat_id, self._prefix, default)
+            return default
+        return val
+
+
+# Состояния диалогов — хранятся в SQLite (таблица sessions), не теряются при перезапуске
+user_states = PersistentDict('user_states')      # chat_id -> шаг анкеты работника (int)
+user_temp = PersistentDict('user_temp')          # chat_id -> dict с данными анкеты в процессе
+vacancy_states = PersistentDict('vacancy_states')  # chat_id -> шаг создания вакансии (int)
+vacancy_temp = PersistentDict('vacancy_temp')    # chat_id -> dict с данными новой вакансии
+review_states = PersistentDict('review_states')  # chat_id -> {'employer_id', 'vac_id', 'rating'}
+search_states = PersistentDict('search_states')  # chat_id -> {'step': ..., 'profession': ...}
+search_results = PersistentDict('search_results')  # chat_id -> {'vacancies': [...], 'index': int}
+sub_states = PersistentDict('sub_states')        # chat_id -> {'step': ..., 'profession': ...}
 
 STATUS_EMOJI = {'active': '🟢', 'closed': '🔴'}
 STATUS_LABEL = {'active': 'Активна', 'closed': 'Закрыта'}
@@ -368,7 +408,9 @@ def handle_questionnaire(message):
     step_index = user_states[cid]
     step_key = STEPS[step_index]
 
-    user_temp.setdefault(cid, {})[step_key] = message.text
+    tmp = user_temp.get(cid, {})
+    tmp[step_key] = message.text
+    user_temp[cid] = tmp
 
     next_index = step_index + 1
     if next_index < len(STEPS):
@@ -470,7 +512,9 @@ def handle_vacancy(message):
     cid = message.chat.id
     step_index = vacancy_states[cid]
     step_key = VAC_STEPS[step_index]
-    vacancy_temp[cid][step_key] = message.text
+    tmp = vacancy_temp[cid]
+    tmp[step_key] = message.text
+    vacancy_temp[cid] = tmp
 
     next_index = step_index + 1
     if next_index < len(VAC_STEPS):
@@ -614,6 +658,7 @@ def handle_next_vac(call):
         bot.answer_callback_query(call.id, "Сессия поиска устарела. Запустите поиск заново.")
         return
     state['index'] += 1
+    search_results[cid] = state
     idx = state['index']
     vacancies_list = state['vacancies']
     if idx >= len(vacancies_list):

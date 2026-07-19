@@ -11,7 +11,7 @@ import logging
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 import database as db
-from official_parser import run_all_parsers
+from official_parser import run_all_parsers, discover_parsers, PARSERS
 
 logger = logging.getLogger(__name__)
 
@@ -40,9 +40,7 @@ def _notify_subscriber(bot, user_id: int, vac: dict) -> None:
 
 def run_parser_cycle(bot) -> None:
     """Один цикл: запуск всех парсеров + уведомление подписчиков о новых вакансиях."""
-    # atlas_mining_parser регистрирует себя в PARSERS при импорте;
-    # повторный импорт безопасен — Python кэширует модули.
-    import atlas_mining_parser  # noqa: F401
+    discover_parsers()  # идемпотентно — загружает парсеры из parsers/ если ещё не загружены
 
     logger.info("[Scheduler] Запуск цикла обновления официальных вакансий...")
     results = run_all_parsers()
@@ -65,7 +63,7 @@ def run_parser_for_source(bot, source_id: int) -> dict | None:
     Возвращает результат run() или None если подходящий парсер не найден.
     Уведомляет подписчиков о новых вакансиях.
     """
-    import atlas_mining_parser  # noqa: F401
+    discover_parsers()  # убеждаемся что все парсеры зарегистрированы
 
     for parser in PARSERS:
         if parser.source_id == source_id:

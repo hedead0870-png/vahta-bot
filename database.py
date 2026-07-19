@@ -802,6 +802,15 @@ def set_source_active(source_id, active: bool):
             (1 if active else 0, source_id)
         )
 
+def count_official_vacancies_by_company(company_name: str) -> int:
+    """Возвращает количество официальных вакансий по названию компании."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM official_vacancies WHERE company_name = ?",
+            (company_name,)
+        ).fetchone()
+        return row['cnt'] if row else 0
+
 # ─────────────────────────────────────────────────────────────
 
 def find_matching_subscribers(profession, city):

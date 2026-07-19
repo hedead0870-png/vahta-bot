@@ -37,6 +37,17 @@ import database as db
 logger = logging.getLogger(__name__)
 
 
+def get_or_create_source_id(company_name: str, vacancies_url: str,
+                             website: str | None = None) -> int:
+    """Универсальный хелпер: возвращает id источника из БД, создаёт запись если нет.
+    Ищет по vacancies_url во всех источниках (active и inactive).
+    """
+    for s in db.get_all_sources():
+        if s["vacancies_url"] == vacancies_url:
+            return s["id"]
+    return db.add_official_source(company_name, vacancies_url, website)
+
+
 class BaseParser:
     """Абстрактный загрузчик вакансий с официального источника.
 
@@ -95,6 +106,26 @@ class BaseParser:
 # Добавляйте экземпляры своих парсеров сюда:
 
 PARSERS: list[BaseParser] = []
+
+
+def discover_parsers() -> None:
+    """Автоматически импортирует все модули из пакета parsers/.
+    Каждый модуль при загрузке регистрирует свой класс в PARSERS.
+    Повторный вызов безопасен — Python кэширует уже загруженные модули.
+    """
+    import importlib
+    import pkgutil
+    try:
+        import parsers as _pkg
+    except ImportError:
+        logger.warning("Пакет parsers/ не найден — автоматическое обнаружение пропущено.")
+        return
+    for _, module_name, _ in pkgutil.iter_modules(_pkg.__path__):
+        try:
+            importlib.import_module(f"parsers.{module_name}")
+            logger.debug("Парсер загружен: parsers.%s", module_name)
+        except Exception as e:
+            logger.error("Ошибка загрузки парсера parsers.%s: %s", module_name, e)
 
 
 def run_all_parsers() -> list[dict]:

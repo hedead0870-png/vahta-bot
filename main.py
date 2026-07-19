@@ -1344,14 +1344,16 @@ def admin_sources_list(call):
         f"🌐 *Официальные источники* ({len(sources)}):",
         parse_mode="Markdown", reply_markup=header)
     for src in sources:
-        status = _source_status(src['active'])
+        status   = _source_status(src['active'])
         last_upd = (src.get('last_update') or '—')[:16]
-        site = src.get('website') or '—'
-        vac_url = src.get('vacancies_url') or '—'
+        site     = src.get('website') or '—'
+        vac_url  = src.get('vacancies_url') or '—'
+        vac_cnt  = db.count_official_vacancies_by_company(src['company_name'])
         text = (
             f"🏢 *{src['company_name']}*\n"
             f"🌍 Сайт: {site}\n"
             f"🔗 Вакансии: {vac_url}\n"
+            f"📊 Вакансий в БД: {vac_cnt}\n"
             f"Статус: {status}\n"
             f"🕒 Обновлён: {last_upd}"
         )
@@ -1359,8 +1361,8 @@ def admin_sources_list(call):
         toggle_val   = 0 if src['active'] else 1
         inline = InlineKeyboardMarkup(row_width=2)
         inline.add(
-            InlineKeyboardButton(toggle_label,     callback_data=f"admin_src_toggle:{src['id']}:{toggle_val}"),
-            InlineKeyboardButton("🔄 Обновить",   callback_data=f"admin_src_refresh:{src['id']}"),
+            InlineKeyboardButton(toggle_label,   callback_data=f"admin_src_toggle:{src['id']}:{toggle_val}"),
+            InlineKeyboardButton("🔄 Обновить", callback_data=f"admin_src_refresh:{src['id']}"),
         )
         bot.send_message(call.message.chat.id, text, parse_mode="Markdown",
                          disable_web_page_preview=True, reply_markup=inline)
@@ -1392,12 +1394,14 @@ def admin_src_toggle(call):
         pass
     # Обновляем текст статуса
     last_upd = (src.get('last_update') or '—')[:16]
-    site = src.get('website') or '—'
-    vac_url = src.get('vacancies_url') or '—'
+    site     = src.get('website') or '—'
+    vac_url  = src.get('vacancies_url') or '—'
+    vac_cnt  = db.count_official_vacancies_by_company(src['company_name'])
     new_text = (
         f"🏢 *{src['company_name']}*\n"
         f"🌍 Сайт: {site}\n"
         f"🔗 Вакансии: {vac_url}\n"
+        f"📊 Вакансий в БД: {vac_cnt}\n"
         f"Статус: {status}\n"
         f"🕒 Обновлён: {last_upd}"
     )

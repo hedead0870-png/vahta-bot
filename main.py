@@ -1101,6 +1101,34 @@ def handle_toggle_vac(call):
     new_inline.add(InlineKeyboardButton(toggle_label, callback_data=f"toggle_vac:{vac_id}"))
     bot.edit_message_reply_markup(employer_id, call.message.message_id, reply_markup=new_inline)
     bot.send_message(employer_id, f"Вакансия #{vac_id} теперь: {emoji} {label}")
+    # Уведомляем подписчиков при повторном открытии вакансии
+    if new_status == 'active':
+        subscribers = db.find_matching_subscribers(
+            profession=vac.get('profession', ''),
+            city=vac.get('city', '')
+        )
+        if subscribers:
+            notify_text = (
+                "🔔 *Вакансия снова открыта!*\n\n"
+                f"🏢 Компания: {vac.get('company', '—')}\n"
+                f"👷 Профессия: {vac.get('profession', '—')}\n"
+                f"📍 Город: {vac.get('city', '—')}\n"
+                f"💰 Зарплата: {vac.get('salary', '—')}\n"
+                f"⛺ График: {vac.get('schedule', '—')}"
+            )
+            notify_inline = InlineKeyboardMarkup(row_width=2)
+            notify_inline.add(
+                InlineKeyboardButton("📩 Откликнуться",   callback_data=f"apply:{employer_id}:{vac_id}"),
+                InlineKeyboardButton("⭐ Оставить отзыв", callback_data=f"review:{employer_id}:{vac_id}"),
+            )
+            for sub_uid in subscribers:
+                if sub_uid == employer_id:
+                    continue
+                try:
+                    bot.send_message(sub_uid, notify_text,
+                                     parse_mode="Markdown", reply_markup=notify_inline)
+                except Exception:
+                    pass
 
 @bot.message_handler(func=lambda m: m.text == '👥 Найти работников')
 def find_workers(message):

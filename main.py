@@ -1435,6 +1435,12 @@ def about(message):
         "Vahta-bot — платформа для поиска работы и сотрудников.\n"
         "Мы помогаем соискателям и работодателям найти друг друга быстро и удобно.")
 
+import logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+import scheduler
+scheduler.start_scheduler(bot)
+
 print("Бот запущен")
 
 bot.infinity_polling()

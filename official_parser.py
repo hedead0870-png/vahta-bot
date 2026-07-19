@@ -65,10 +65,12 @@ class BaseParser:
 
         saved = 0
         duplicates = 0
+        new_vacancies: list[dict] = []
         for vac in vacancies:
             result = db.save_official_vacancy(vac)
             if result is not None:
                 saved += 1
+                new_vacancies.append(vac)
             else:
                 duplicates += 1
 
@@ -81,7 +83,12 @@ class BaseParser:
 
         logger.info("[%s] Загружено: %d, сохранено: %d, дублей: %d",
                     self.__class__.__name__, len(vacancies), saved, duplicates)
-        return {"fetched": len(vacancies), "saved": saved, "duplicates": duplicates}
+        return {
+            "fetched": len(vacancies),
+            "saved": saved,
+            "duplicates": duplicates,
+            "new_vacancies": new_vacancies,
+        }
 
 
 # ── Реестр загрузчиков ────────────────────────────────────────

@@ -114,6 +114,29 @@ def init_db():
                 created_at TEXT DEFAULT (datetime('now')),
                 UNIQUE(blocker_id, blocked_id)
             );
+
+            CREATE TABLE IF NOT EXISTS official_sources (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                company_name TEXT    NOT NULL,
+                website      TEXT,
+                vacancies_url TEXT   NOT NULL,
+                active       INTEGER NOT NULL DEFAULT 1,
+                last_update  TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS official_vacancies (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                company_name TEXT    NOT NULL,
+                profession   TEXT,
+                city         TEXT,
+                salary       TEXT,
+                schedule     TEXT,
+                description  TEXT,
+                contact      TEXT,
+                source_url   TEXT,
+                created_at   TEXT    DEFAULT (datetime('now')),
+                UNIQUE(company_name, profession, city, source_url)
+            );
         """)
         # Миграции: добавить колонки если таблица уже существует без них
         cols = [r[1] for r in conn.execute("PRAGMA table_info(vacancies)").fetchall()]
@@ -679,6 +702,83 @@ def del_all_sessions(chat_id):
     """Удаляет все сессии пользователя (при сбросе состояния)."""
     with get_conn() as conn:
         conn.execute("DELETE FROM sessions WHERE chat_id = ?", (chat_id,))
+
+# ── Официальные источники вакансий ───────────────────────────
+
+def add_official_source(company_name, vacancies_url, website=None):
+    """Добавляет источник. Возвращает id новой записи."""
+    with get_conn() as conn:
+        cur = conn.execute(
+            """INSERT INTO official_sources (company_name, website, vacancies_url)
+               VALUES (?, ?, ?)""",
+            (company_name, website, vacancies_url)
+        )
+        return cur.lastrowid
+
+def get_active_sources():
+    """Возвращает список активных источников (active=1)."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM official_sources WHERE active = 1 ORDER BY id"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+def touch_source(source_id):
+    """Обновляет last_update у источника до текущего момента."""
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE official_sources SET last_update = datetime('now') WHERE id = ?",
+            (source_id,)
+        )
+
+def save_official_vacancy(data):
+    """Сохраняет официальную вакансию, игнорируя дубль по (company_name, profession, city, source_url).
+    Возвращает id записи или None при дубле.
+    """
+    try:
+        with get_conn() as conn:
+            cur = conn.execute(
+                """INSERT INTO official_vacancies
+                       (company_name, profession, city, salary, schedule,
+                        description, contact, source_url)
+                   VALUES
+                       (:company_name, :profession, :city, :salary, :schedule,
+                        :description, :contact, :source_url)""",
+                {
+                    "company_name": data.get("company_name"),
+                    "profession":   data.get("profession"),
+                    "city":         data.get("city"),
+                    "salary":       data.get("salary"),
+                    "schedule":     data.get("schedule"),
+                    "description":  data.get("description"),
+                    "contact":      data.get("contact"),
+                    "source_url":   data.get("source_url"),
+                }
+            )
+            return cur.lastrowid
+    except sqlite3.IntegrityError:
+        return None
+
+def get_official_vacancies(profession=None, city=None, limit=50):
+    """Возвращает официальные вакансии с опциональной фильтрацией по профессии и городу."""
+    conditions = []
+    params = []
+    if profession:
+        conditions.append("LOWER(profession) LIKE LOWER(?)")
+        params.append(f"%{profession.strip()}%")
+    if city:
+        conditions.append("LOWER(city) = LOWER(?)")
+        params.append(city.strip())
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    params.append(limit)
+    with get_conn() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM official_vacancies {where} ORDER BY created_at DESC LIMIT ?",
+            params
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+# ─────────────────────────────────────────────────────────────
 
 def find_matching_subscribers(profession, city):
     """Возвращает user_id всех подписчиков, которым подходит вакансия.

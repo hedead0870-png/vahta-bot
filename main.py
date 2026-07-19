@@ -58,6 +58,7 @@ search_states = PersistentDict('search_states')  # chat_id -> {'step': ..., 'pro
 search_results = PersistentDict('search_results')  # chat_id -> {'vacancies': [...], 'index': int}
 sub_states = PersistentDict('sub_states')        # chat_id -> {'step': ..., 'profession': ...}
 complaint_states = PersistentDict('complaint_states')  # chat_id -> {'employer_id', 'reason'}
+admin_src_states = PersistentDict('admin_src_states')   # chat_id -> {'step': str, ...} — добавление источника
 chat_states = PersistentDict('chat_states')          # chat_id -> {'app_id', 'receiver_id', 'my_role'}
 
 STATUS_EMOJI = {'active': '🟢', 'closed': '🔴'}
@@ -574,6 +575,7 @@ def admin_panel(message):
     inline = InlineKeyboardMarkup(row_width=1)
     inline.add(InlineKeyboardButton("👷 Статусы работодателей", callback_data="admin_emp_list"))
     inline.add(InlineKeyboardButton(complaints_label, callback_data="admin_complaints"))
+    inline.add(InlineKeyboardButton("🌐 Официальные источники", callback_data="admin_sources"))
     bot.send_message(message.chat.id,
         f"👨‍💼 *Админ панель*\n\n"
         f"👥 Пользователей в БД: {db.count_users()}\n"
@@ -1318,6 +1320,194 @@ def admin_complaint_resolve(call):
     bot.edit_message_text(
         call.message.text + "\n\n✅ _Рассмотрена_",
         call.message.chat.id, call.message.message_id, parse_mode="Markdown")
+
+# ── Админ: официальные источники ─────────────────────────────
+
+def _source_status(active) -> str:
+    return "🟢 Активен" if active else "🔴 Отключён"
+
+@bot.callback_query_handler(func=lambda call: call.data == 'admin_sources')
+def admin_sources_list(call):
+    if not _is_admin(call.message.chat.id):
+        bot.answer_callback_query(call.id, "🚫 Нет доступа.")
+        return
+    bot.answer_callback_query(call.id)
+    sources = db.get_all_sources()
+    header = InlineKeyboardMarkup(row_width=1)
+    header.add(InlineKeyboardButton("➕ Добавить источник", callback_data="admin_src_add"))
+    if not sources:
+        bot.send_message(call.message.chat.id,
+            "🌐 *Официальные источники*\n\nИсточников пока нет.",
+            parse_mode="Markdown", reply_markup=header)
+        return
+    bot.send_message(call.message.chat.id,
+        f"🌐 *Официальные источники* ({len(sources)}):",
+        parse_mode="Markdown", reply_markup=header)
+    for src in sources:
+        status = _source_status(src['active'])
+        last_upd = (src.get('last_update') or '—')[:16]
+        site = src.get('website') or '—'
+        vac_url = src.get('vacancies_url') or '—'
+        text = (
+            f"🏢 *{src['company_name']}*\n"
+            f"🌍 Сайт: {site}\n"
+            f"🔗 Вакансии: {vac_url}\n"
+            f"Статус: {status}\n"
+            f"🕒 Обновлён: {last_upd}"
+        )
+        toggle_label = "🔴 Отключить" if src['active'] else "🟢 Включить"
+        toggle_val   = 0 if src['active'] else 1
+        inline = InlineKeyboardMarkup(row_width=2)
+        inline.add(
+            InlineKeyboardButton(toggle_label,     callback_data=f"admin_src_toggle:{src['id']}:{toggle_val}"),
+            InlineKeyboardButton("🔄 Обновить",   callback_data=f"admin_src_refresh:{src['id']}"),
+        )
+        bot.send_message(call.message.chat.id, text, parse_mode="Markdown",
+                         disable_web_page_preview=True, reply_markup=inline)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('admin_src_toggle:'))
+def admin_src_toggle(call):
+    if not _is_admin(call.message.chat.id):
+        bot.answer_callback_query(call.id, "🚫 Нет доступа.")
+        return
+    _, src_id_str, val_str = call.data.split(':')
+    src_id = int(src_id_str)
+    active = bool(int(val_str))
+    db.set_source_active(src_id, active)
+    src = db.get_source_by_id(src_id)
+    status = _source_status(src['active'])
+    bot.answer_callback_query(call.id, f"✅ Источник {status.lower()}")
+    # Обновляем кнопки
+    toggle_label = "🔴 Отключить" if src['active'] else "🟢 Включить"
+    toggle_val   = 0 if src['active'] else 1
+    new_markup = InlineKeyboardMarkup(row_width=2)
+    new_markup.add(
+        InlineKeyboardButton(toggle_label,   callback_data=f"admin_src_toggle:{src_id}:{toggle_val}"),
+        InlineKeyboardButton("🔄 Обновить", callback_data=f"admin_src_refresh:{src_id}"),
+    )
+    try:
+        bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id,
+                                      reply_markup=new_markup)
+    except Exception:
+        pass
+    # Обновляем текст статуса
+    last_upd = (src.get('last_update') or '—')[:16]
+    site = src.get('website') or '—'
+    vac_url = src.get('vacancies_url') or '—'
+    new_text = (
+        f"🏢 *{src['company_name']}*\n"
+        f"🌍 Сайт: {site}\n"
+        f"🔗 Вакансии: {vac_url}\n"
+        f"Статус: {status}\n"
+        f"🕒 Обновлён: {last_upd}"
+    )
+    try:
+        bot.edit_message_text(new_text, call.message.chat.id, call.message.message_id,
+                              parse_mode="Markdown", disable_web_page_preview=True,
+                              reply_markup=new_markup)
+    except Exception:
+        pass
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('admin_src_refresh:'))
+def admin_src_refresh(call):
+    if not _is_admin(call.message.chat.id):
+        bot.answer_callback_query(call.id, "🚫 Нет доступа.")
+        return
+    bot.answer_callback_query(call.id, "⏳ Запускаю парсер…")
+    src_id = int(call.data.split(':')[1])
+    src = db.get_source_by_id(src_id)
+    company = src['company_name'] if src else f"ID {src_id}"
+
+    import threading
+    def _run():
+        import scheduler as _sch
+        result = _sch.run_parser_for_source(bot, src_id)
+        if result is None:
+            bot.send_message(call.message.chat.id,
+                f"⚠️ Парсер для *{company}* не найден.\n"
+                "Необходимо реализовать парсер и зарегистрировать его в PARSERS.",
+                parse_mode="Markdown")
+        else:
+            bot.send_message(call.message.chat.id,
+                f"✅ *{company}* — парсинг завершён\n\n"
+                f"📥 Загружено: {result['fetched']}\n"
+                f"🆕 Новых: {result['saved']}\n"
+                f"🔁 Дублей: {result['duplicates']}",
+                parse_mode="Markdown")
+    threading.Thread(target=_run, daemon=True).start()
+
+# ── Админ: добавление нового источника ───────────────────────
+
+@bot.callback_query_handler(func=lambda call: call.data == 'admin_src_add')
+def admin_src_add_start(call):
+    if not _is_admin(call.message.chat.id):
+        bot.answer_callback_query(call.id, "🚫 Нет доступа.")
+        return
+    bot.answer_callback_query(call.id)
+    admin_src_states[call.message.chat.id] = {'step': 'company'}
+    bot.send_message(call.message.chat.id,
+        "➕ *Добавление источника* (шаг 1/3)\n\n"
+        "Введите *название компании*:\n\n"
+        "_(или /cancel для отмены)_",
+        parse_mode="Markdown")
+
+@bot.message_handler(func=lambda m: m.chat.id in admin_src_states)
+def admin_src_add_flow(message):
+    cid = message.chat.id
+    if not _is_admin(cid):
+        return
+    text = (message.text or '').strip()
+    if text == '/cancel':
+        admin_src_states.pop(cid, None)
+        bot.send_message(cid, "❌ Добавление источника отменено.")
+        return
+    state = admin_src_states.get(cid, {})
+    step  = state.get('step')
+
+    if step == 'company':
+        if not text:
+            bot.send_message(cid, "⚠️ Название не может быть пустым. Введите название компании:")
+            return
+        state['company'] = text
+        state['step']    = 'website'
+        admin_src_states[cid] = state
+        bot.send_message(cid,
+            "➕ *Добавление источника* (шаг 2/3)\n\n"
+            "Введите *официальный сайт* компании (например: https://company.ru):\n\n"
+            "_(или /cancel для отмены)_",
+            parse_mode="Markdown")
+
+    elif step == 'website':
+        state['website'] = text or None
+        state['step']    = 'vacancies_url'
+        admin_src_states[cid] = state
+        bot.send_message(cid,
+            "➕ *Добавление источника* (шаг 3/3)\n\n"
+            "Введите *URL страницы с вакансиями* (например: https://company.ru/vacancies/):\n\n"
+            "_(или /cancel для отмены)_",
+            parse_mode="Markdown")
+
+    elif step == 'vacancies_url':
+        if not text:
+            bot.send_message(cid, "⚠️ URL вакансий не может быть пустым. Введите ссылку:")
+            return
+        state['vacancies_url'] = text
+        admin_src_states.pop(cid, None)
+        new_id = db.add_official_source(
+            company_name=state['company'],
+            vacancies_url=state['vacancies_url'],
+            website=state.get('website'),
+        )
+        bot.send_message(cid,
+            f"✅ *Источник добавлен* (ID: {new_id})\n\n"
+            f"🏢 Компания: {state['company']}\n"
+            f"🌍 Сайт: {state.get('website') or '—'}\n"
+            f"🔗 Вакансии: {state['vacancies_url']}\n\n"
+            "Источник создан со статусом 🟢 Активен.\n"
+            "Чтобы написать парсер — добавьте класс-наследник BaseParser и зарегистрируйте его в PARSERS.",
+            parse_mode="Markdown")
+    else:
+        admin_src_states.pop(cid, None)
 
 # ── Внутренний чат ───────────────────────────────────────────
 

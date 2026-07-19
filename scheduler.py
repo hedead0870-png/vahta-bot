@@ -60,6 +60,33 @@ def run_parser_cycle(bot) -> None:
                 _notify_subscriber(bot, uid, vac)
 
 
+def run_parser_for_source(bot, source_id: int) -> dict | None:
+    """Запускает парсер конкретного источника по source_id.
+    Возвращает результат run() или None если подходящий парсер не найден.
+    Уведомляет подписчиков о новых вакансиях.
+    """
+    import atlas_mining_parser  # noqa: F401
+
+    for parser in PARSERS:
+        if parser.source_id == source_id:
+            name = parser.__class__.__name__
+            logger.info("[Scheduler] Ручной запуск парсера %s (source_id=%d)", name, source_id)
+            try:
+                result = parser.run()
+            except Exception as e:
+                logger.error("[Scheduler] Ошибка парсера %s: %s", name, e)
+                return {"fetched": 0, "saved": 0, "duplicates": 0, "new_vacancies": []}
+            for vac in result.get("new_vacancies", []):
+                subscribers = db.find_matching_subscribers(
+                    profession=vac.get("profession", ""),
+                    city=vac.get("city", ""),
+                )
+                for uid in subscribers:
+                    _notify_subscriber(bot, uid, vac)
+            return result
+    return None
+
+
 def _scheduler_loop(bot) -> None:
     """Фоновый поток: запускается сразу, затем повторяет каждые INTERVAL_HOURS часов."""
     import time

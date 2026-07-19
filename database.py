@@ -778,6 +778,30 @@ def get_official_vacancies(profession=None, city=None, limit=50):
         ).fetchall()
         return [dict(r) for r in rows]
 
+def get_all_sources():
+    """Возвращает все источники (active и inactive), отсортированные по id."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM official_sources ORDER BY id"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+def get_source_by_id(source_id):
+    """Возвращает источник по id или None."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM official_sources WHERE id = ?", (source_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+def set_source_active(source_id, active: bool):
+    """Включает (active=True) или отключает (active=False) источник."""
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE official_sources SET active = ? WHERE id = ?",
+            (1 if active else 0, source_id)
+        )
+
 # ─────────────────────────────────────────────────────────────
 
 def find_matching_subscribers(profession, city):

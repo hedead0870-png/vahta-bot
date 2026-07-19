@@ -145,6 +145,46 @@ def init_db():
         if 'inn' not in cols:
             conn.execute("ALTER TABLE vacancies ADD COLUMN inn TEXT")
 
+        # Миграция: дедупликация official_sources + уникальный индекс по company_name.
+        # Причина: add_official_source() раньше делал безусловный INSERT, поэтому при
+        # смене vacancies_url появлялись дублирующие строки для одной компании.
+        # Шаги:
+        #   1. Обновляем MIN(id)-запись каждой компании данными из последней (MAX id) записи.
+        #   2. Удаляем все дубли — остаётся одна строка с актуальным URL.
+        #   3. Создаём UNIQUE INDEX на company_name, чтобы дубли были невозможны впредь.
+        src_idx_names = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='official_sources'"
+        ).fetchall()}
+        if 'idx_os_company_name' not in src_idx_names:
+            # Переносим актуальный URL из последней записи в самую старую (MIN id)
+            conn.execute("""
+                UPDATE official_sources
+                SET vacancies_url = (
+                        SELECT vacancies_url FROM official_sources os2
+                        WHERE os2.company_name = official_sources.company_name
+                        ORDER BY os2.id DESC LIMIT 1
+                    ),
+                    website = (
+                        SELECT website FROM official_sources os2
+                        WHERE os2.company_name = official_sources.company_name
+                        ORDER BY os2.id DESC LIMIT 1
+                    )
+                WHERE id IN (
+                    SELECT MIN(id) FROM official_sources GROUP BY company_name
+                )
+            """)
+            # Удаляем дублирующие строки — оставляем MIN(id) на компанию
+            conn.execute("""
+                DELETE FROM official_sources
+                WHERE id NOT IN (
+                    SELECT MIN(id) FROM official_sources GROUP BY company_name
+                )
+            """)
+            conn.execute("""
+                CREATE UNIQUE INDEX idx_os_company_name
+                ON official_sources(company_name)
+            """)
+
         # Миграция: частичный уникальный индекс для вакансий без города (city IS NULL).
         # Стандартный UNIQUE-constraint не ловит дубли, когда city=NULL, потому что
         # в SQL NULL != NULL. Решение — отдельный частичный индекс.
@@ -730,8 +770,24 @@ def del_all_sessions(chat_id):
 # ── Официальные источники вакансий ───────────────────────────
 
 def add_official_source(company_name, vacancies_url, website=None):
-    """Добавляет источник. Возвращает id новой записи."""
+    """Upsert источника по company_name.
+
+    Если компания уже есть — обновляет vacancies_url и website, возвращает
+    существующий id. Если нет — создаёт новую запись и возвращает её id.
+    """
     with get_conn() as conn:
+        row = conn.execute(
+            "SELECT id FROM official_sources WHERE company_name = ?",
+            (company_name,)
+        ).fetchone()
+        if row:
+            conn.execute(
+                """UPDATE official_sources
+                   SET vacancies_url = ?, website = ?
+                   WHERE id = ?""",
+                (vacancies_url, website, row["id"])
+            )
+            return row["id"]
         cur = conn.execute(
             """INSERT INTO official_sources (company_name, website, vacancies_url)
                VALUES (?, ?, ?)""",

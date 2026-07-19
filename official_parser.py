@@ -39,12 +39,12 @@ logger = logging.getLogger(__name__)
 
 def get_or_create_source_id(company_name: str, vacancies_url: str,
                              website: str | None = None) -> int:
-    """Универсальный хелпер: возвращает id источника из БД, создаёт запись если нет.
-    Ищет по vacancies_url во всех источниках (active и inactive).
+    """Возвращает id источника по company_name, создаёт или обновляет запись.
+
+    Логика делегирована в db.add_official_source(), которая делает upsert:
+    - если компания найдена по company_name — обновляет vacancies_url и website;
+    - если нет — создаёт новую запись.
     """
-    for s in db.get_all_sources():
-        if s["vacancies_url"] == vacancies_url:
-            return s["id"]
     return db.add_official_source(company_name, vacancies_url, website)
 
 

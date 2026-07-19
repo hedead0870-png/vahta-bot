@@ -186,11 +186,15 @@ def cancel(message):
     cid = message.chat.id
     if cid in user_states:
         user_states.pop(cid)
+        user_temp.pop(cid, None)
         bot.send_message(cid, "❌ Заполнение анкеты отменено.", reply_markup=worker_menu_markup())
     elif cid in vacancy_states:
         vacancy_states.pop(cid)
         vacancy_temp.pop(cid, None)
         bot.send_message(cid, "❌ Создание вакансии отменено.", reply_markup=employer_menu_markup())
+    elif cid in review_states:
+        review_states.pop(cid)
+        bot.send_message(cid, "❌ Отзыв отменён.", reply_markup=worker_menu_markup())
     else:
         bot.send_message(cid, "Нечего отменять.", reply_markup=main_menu_markup())
 
@@ -381,6 +385,80 @@ def employer_responses(message):
         bot.send_message(cid, "\n".join(lines), parse_mode="Markdown")
     if not has_any:
         bot.send_message(cid, "📩 Откликов пока нет.")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('review:'))
+def handle_review_start(call):
+    worker_id = call.message.chat.id
+    _, employer_id_str, vac_id_str = call.data.split(':')
+    employer_id = int(employer_id_str)
+    vac_id = int(vac_id_str)
+    if db.has_reviewed(worker_id, vac_id):
+        bot.answer_callback_query(call.id, "Вы уже оставляли отзыв на эту вакансию.")
+        return
+    bot.answer_callback_query(call.id)
+    inline = InlineKeyboardMarkup(row_width=5)
+    inline.add(*[
+        InlineKeyboardButton(f"{'⭐' * n}", callback_data=f"rate:{employer_id}:{vac_id}:{n}")
+        for n in range(1, 6)
+    ])
+    bot.send_message(worker_id, "⭐ Оцените работодателя от 1 до 5 звёзд:", reply_markup=inline)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('rate:'))
+def handle_review_rating(call):
+    worker_id = call.message.chat.id
+    _, employer_id_str, vac_id_str, rating_str = call.data.split(':')
+    review_states[worker_id] = {
+        'employer_id': int(employer_id_str),
+        'vac_id': int(vac_id_str),
+        'rating': int(rating_str),
+    }
+    bot.answer_callback_query(call.id, f"Выбрано: {'⭐' * int(rating_str)}")
+    bot.send_message(worker_id, "✏️ Напишите текстовый отзыв (или отправьте /skip, чтобы пропустить):")
+
+@bot.message_handler(commands=['skip'])
+def review_skip(message):
+    cid = message.chat.id
+    if cid not in review_states:
+        return
+    state = review_states.pop(cid)
+    saved = db.add_review(cid, state['employer_id'], state['vac_id'], state['rating'], text=None)
+    if saved:
+        bot.send_message(cid, f"✅ Отзыв сохранён! Оценка: {'⭐' * state['rating']}")
+    else:
+        bot.send_message(cid, "Вы уже оставляли отзыв на эту вакансию.")
+
+@bot.message_handler(func=lambda m: m.chat.id in review_states)
+def handle_review_text(message):
+    cid = message.chat.id
+    state = review_states.pop(cid)
+    saved = db.add_review(cid, state['employer_id'], state['vac_id'], state['rating'], text=message.text)
+    if saved:
+        bot.send_message(cid,
+            f"✅ Отзыв сохранён!\n"
+            f"Оценка: {'⭐' * state['rating']}\n"
+            f"Текст: {message.text}")
+    else:
+        bot.send_message(cid, "Вы уже оставляли отзыв на эту вакансию.")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('toggle_vac:'))
+def handle_toggle_vac(call):
+    employer_id = call.message.chat.id
+    vac_id = int(call.data.split(':')[1])
+    vac = db.get_vacancy_by_id(vac_id)
+    if not vac or vac['employer_id'] != employer_id:
+        bot.answer_callback_query(call.id, "Вакансия не найдена.")
+        return
+    new_status = 'closed' if vac.get('status', 'active') == 'active' else 'active'
+    db.set_vacancy_status(vac_id, new_status)
+    emoji = STATUS_EMOJI[new_status]
+    label = STATUS_LABEL[new_status]
+    bot.answer_callback_query(call.id, f"Статус изменён: {emoji} {label}")
+    # Обновляем кнопку на месте
+    toggle_label = "🔴 Закрыть" if new_status == 'active' else "🟢 Открыть"
+    new_inline = InlineKeyboardMarkup()
+    new_inline.add(InlineKeyboardButton(toggle_label, callback_data=f"toggle_vac:{vac_id}"))
+    bot.edit_message_reply_markup(employer_id, call.message.message_id, reply_markup=new_inline)
+    bot.send_message(employer_id, f"Вакансия #{vac_id} теперь: {emoji} {label}")
 
 @bot.message_handler(func=lambda m: m.text == '👥 Найти работников')
 def find_workers(message):

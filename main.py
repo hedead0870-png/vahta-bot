@@ -60,6 +60,9 @@ sub_states = PersistentDict('sub_states')        # chat_id -> {'step': ..., 'pro
 complaint_states = PersistentDict('complaint_states')  # chat_id -> {'employer_id', 'reason'}
 admin_src_states = PersistentDict('admin_src_states')   # chat_id -> {'step': str, ...} — добавление источника
 chat_states = PersistentDict('chat_states')          # chat_id -> {'app_id', 'receiver_id', 'my_role'}
+shift_states = PersistentDict('shift_states')        # chat_id -> {'step': 'planned_days'}
+salary_states = PersistentDict('salary_states')      # chat_id -> {'step': 'rate'|'payment', ...}
+expense_states = PersistentDict('expense_states')    # chat_id -> {'step': 'amount', 'category': key, 'shift_id': id|None}
 
 STATUS_EMOJI = {'active': '🟢', 'closed': '🔴'}
 STATUS_LABEL = {'active': 'Активна', 'closed': 'Закрыта'}
@@ -182,20 +185,414 @@ def looking_for_job(message):
     user_states.pop(message.chat.id, None)
     bot.send_message(message.chat.id, "🔍 Меню работника:", reply_markup=worker_menu_markup())
 
+# ── Утилиты личного кабинета ──────────────────────────────────
+
+from datetime import date as _date
+
+EXPENSE_CATEGORIES = [
+    ('food',      '🍔 Еда'),
+    ('transport', '🚌 Транспорт'),
+    ('housing',   '🏠 Жильё'),
+    ('phone',     '📱 Связь'),
+    ('other',     '🛒 Прочее'),
+]
+EXPENSE_CAT_LABEL = {k: v for k, v in EXPENSE_CATEGORIES}
+
+
+def _rub(amount: float) -> str:
+    """Форматирует число с пробелом-тысячником и знаком ₽: 45000 → '45 000 ₽'."""
+    return f"{int(amount):,} ₽".replace(',', ' ')
+
+
+# ── ⛺ Моя вахта ──────────────────────────────────────────────
+
+def _shift_screen(cid: int):
+    """Текст и InlineKeyboard для экрана «Моя вахта»."""
+    shift = db.get_active_shift(cid)
+    inline = InlineKeyboardMarkup(row_width=1)
+    if shift:
+        start   = _date.fromisoformat(shift['start_date'])
+        worked  = (_date.today() - start).days + 1
+        planned = shift['planned_days']
+        lines = ["⛺ *Текущая вахта*\n",
+                 f"📅 Начало: {start.strftime('%d.%m.%Y')}",
+                 f"⏳ Отработано: {worked} дн."]
+        if planned:
+            remaining = max(0, planned - worked)
+            lines += [f"📋 По плану: {planned} дн.",
+                      f"⌛ Осталось: {remaining} дн."]
+        inline.add(InlineKeyboardButton(
+            "⏹ Завершить вахту", callback_data=f"shift_end:{shift['id']}"))
+    else:
+        lines = ["⛺ *Моя вахта*\n",
+                 "Активной вахты нет.\n",
+                 "Нажмите *«Начать вахту»*, чтобы запустить отсчёт."]
+        inline.add(InlineKeyboardButton(
+            "▶️ Начать вахту", callback_data="shift_start"))
+    inline.add(InlineKeyboardButton(
+        "📋 История вахт", callback_data="shift_history"))
+    return "\n".join(lines), inline
+
+
 @bot.message_handler(commands=['shift'])
 @bot.message_handler(func=lambda m: m.text == '⛺ Моя вахта')
 def my_shift(message):
-    bot.send_message(message.chat.id, "⛺ Информация о текущей вахте")
+    text, inline = _shift_screen(message.chat.id)
+    bot.send_message(message.chat.id, text,
+                     parse_mode="Markdown", reply_markup=inline)
+
+
+@bot.callback_query_handler(func=lambda c: c.data == 'shift_start')
+def cb_shift_start(call):
+    cid = call.message.chat.id
+    if db.get_active_shift(cid):
+        bot.answer_callback_query(call.id, "⚠️ Активная вахта уже идёт.")
+        return
+    bot.answer_callback_query(call.id)
+    shift_states[cid] = {'step': 'planned_days'}
+    bot.send_message(
+        cid,
+        "⛺ *Начало вахты*\n\n"
+        "Сколько дней планируете работать?\n"
+        "Введите число (например: 30) или 0, если не знаете.\n\n"
+        "Для отмены: /cancel",
+        parse_mode="Markdown",
+        reply_markup=ReplyKeyboardRemove())
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith('shift_end:'))
+def cb_shift_end(call):
+    cid      = call.message.chat.id
+    shift_id = int(call.data.split(':')[1])
+    today    = _date.today()
+    db.end_shift(shift_id, today.isoformat())
+    bot.answer_callback_query(call.id, "✅ Вахта завершена.")
+    # Показываем итог завершённой вахты
+    history = db.get_shifts_history(cid, limit=1)
+    if history:
+        s      = history[0]
+        start  = _date.fromisoformat(s['start_date'])
+        end_d  = _date.fromisoformat(s['end_date'])
+        worked = (end_d - start).days + 1
+        try:
+            bot.edit_message_text(
+                f"✅ *Вахта завершена!*\n\n"
+                f"📅 {start.strftime('%d.%m.%Y')} → {end_d.strftime('%d.%m.%Y')}\n"
+                f"⏳ Отработано: {worked} дн.",
+                cid, call.message.message_id, parse_mode="Markdown")
+        except Exception:
+            pass
+    text, inline = _shift_screen(cid)
+    bot.send_message(cid, text, parse_mode="Markdown", reply_markup=inline)
+
+
+@bot.callback_query_handler(func=lambda c: c.data == 'shift_history')
+def cb_shift_history(call):
+    cid = call.message.chat.id
+    bot.answer_callback_query(call.id)
+    shifts = db.get_shifts_history(cid, limit=10)
+    if not shifts:
+        bot.send_message(cid, "📋 История вахт пуста.")
+        return
+    today = _date.today()
+    lines = ["📋 *История вахт*\n"]
+    for i, s in enumerate(shifts, 1):
+        start  = _date.fromisoformat(s['start_date'])
+        if s['end_date']:
+            end_d  = _date.fromisoformat(s['end_date'])
+            worked = (end_d - start).days + 1
+            status = f"{start.strftime('%d.%m.%Y')} → {end_d.strftime('%d.%m.%Y')} ({worked} дн.)"
+        else:
+            worked = (today - start).days + 1
+            status = f"{start.strftime('%d.%m.%Y')} → сейчас ({worked} дн.) 🟢"
+        plan = f"  план: {s['planned_days']} дн." if s['planned_days'] else ""
+        lines.append(f"{i}. {status}{plan}")
+    bot.send_message(cid, "\n".join(lines), parse_mode="Markdown")
+
+
+@bot.message_handler(func=lambda m: m.chat.id in shift_states)
+def handle_shift_input(message):
+    cid   = message.chat.id
+    state = shift_states[cid]
+    if state['step'] == 'planned_days':
+        try:
+            planned = int(message.text.strip())
+            if planned < 0:
+                raise ValueError
+        except ValueError:
+            bot.send_message(cid, "⚠️ Введите целое число (0 если не знаете):")
+            return
+        shift_states.pop(cid)
+        today       = _date.today()
+        planned_arg = planned if planned > 0 else None
+        db.start_shift(cid, today.isoformat(), planned_arg)
+        bot.send_message(
+            cid,
+            f"✅ *Вахта начата!*  📅 {today.strftime('%d.%m.%Y')}",
+            parse_mode="Markdown",
+            reply_markup=worker_menu_markup())
+        text, inline = _shift_screen(cid)
+        bot.send_message(cid, text, parse_mode="Markdown", reply_markup=inline)
+
+
+# ── 💰 Зарплата ──────────────────────────────────────────────
+
+def _salary_screen(cid: int):
+    """Текст и InlineKeyboard для экрана «Зарплата»."""
+    daily_rate = db.get_daily_rate(cid)
+    shift      = db.get_active_shift(cid)
+    if shift:
+        start       = _date.fromisoformat(shift['start_date'])
+        worked_days = (_date.today() - start).days + 1
+    else:
+        worked_days = 0
+    accrued = (daily_rate or 0) * worked_days
+    paid    = db.get_total_payments(cid)
+    balance = accrued - paid
+
+    rate_str = f"{_rub(daily_rate)}/день" if daily_rate else "не задана"
+    lines = [
+        "💰 *Зарплата*\n",
+        f"📐 Ставка: {rate_str}",
+        f"📅 Отработано: {worked_days} дн.",
+        f"📈 Начислено: {_rub(accrued)}",
+        f"💳 Получено:  {_rub(paid)}",
+        f"💵 Остаток:   {_rub(balance)}",
+    ]
+    if not shift:
+        lines.append("\n_Запустите вахту для учёта отработанных дней._")
+
+    inline = InlineKeyboardMarkup(row_width=2)
+    inline.add(
+        InlineKeyboardButton("⚙️ Изменить ставку",  callback_data="salary_set_rate"),
+        InlineKeyboardButton("💳 Добавить выплату", callback_data="salary_add_payment"),
+    )
+    inline.add(InlineKeyboardButton(
+        "📋 История выплат", callback_data="salary_history"))
+    return "\n".join(lines), inline
+
 
 @bot.message_handler(commands=['salary'])
 @bot.message_handler(func=lambda m: m.text == '💰 Зарплата')
-def salary(message):
-    bot.send_message(message.chat.id, "💰 Раздел зарплаты")
+def salary_menu(message):
+    text, inline = _salary_screen(message.chat.id)
+    bot.send_message(message.chat.id, text,
+                     parse_mode="Markdown", reply_markup=inline)
+
+
+@bot.callback_query_handler(func=lambda c: c.data == 'salary_set_rate')
+def cb_salary_set_rate(call):
+    cid = call.message.chat.id
+    bot.answer_callback_query(call.id)
+    salary_states[cid] = {'step': 'rate'}
+    bot.send_message(
+        cid,
+        "⚙️ *Ставка за день*\n\n"
+        "Введите ставку в рублях (например: 2500):\n\nДля отмены: /cancel",
+        parse_mode="Markdown",
+        reply_markup=ReplyKeyboardRemove())
+
+
+@bot.callback_query_handler(func=lambda c: c.data == 'salary_add_payment')
+def cb_salary_add_payment(call):
+    cid   = call.message.chat.id
+    shift = db.get_active_shift(cid)
+    bot.answer_callback_query(call.id)
+    salary_states[cid] = {
+        'step':     'payment',
+        'shift_id': shift['id'] if shift else None,
+    }
+    bot.send_message(
+        cid,
+        "💳 *Добавить выплату*\n\n"
+        "Введите сумму полученной выплаты (например: 30000):\n\nДля отмены: /cancel",
+        parse_mode="Markdown",
+        reply_markup=ReplyKeyboardRemove())
+
+
+@bot.callback_query_handler(func=lambda c: c.data == 'salary_history')
+def cb_salary_history(call):
+    cid = call.message.chat.id
+    bot.answer_callback_query(call.id)
+    payments = db.get_salary_payments(cid, limit=10)
+    if not payments:
+        bot.send_message(cid, "📋 История выплат пуста.")
+        return
+    lines = ["📋 *История выплат*\n"]
+    for p in payments:
+        date_str = (p['created_at'] or '')[:10]
+        note     = f" — {p['note']}" if p.get('note') else ""
+        lines.append(f"• {_rub(p['amount'])}{note}  ({date_str})")
+    lines.append(f"\n💰 Итого получено: {_rub(db.get_total_payments(cid))}")
+    bot.send_message(cid, "\n".join(lines), parse_mode="Markdown")
+
+
+@bot.message_handler(func=lambda m: m.chat.id in salary_states)
+def handle_salary_input(message):
+    cid   = message.chat.id
+    state = salary_states[cid]
+    raw   = message.text.strip().replace(' ', '').replace(',', '.')
+    try:
+        amount = float(raw)
+        if amount <= 0:
+            raise ValueError
+    except ValueError:
+        bot.send_message(cid, "⚠️ Введите положительное число (например: 2500):")
+        return
+
+    if state['step'] == 'rate':
+        salary_states.pop(cid)
+        db.set_daily_rate(cid, amount)
+        bot.send_message(cid, f"✅ Ставка: {_rub(amount)}/день",
+                         reply_markup=worker_menu_markup())
+        text, inline = _salary_screen(cid)
+        bot.send_message(cid, text, parse_mode="Markdown", reply_markup=inline)
+
+    elif state['step'] == 'payment':
+        shift_id = state.get('shift_id')
+        salary_states.pop(cid)
+        db.add_salary_payment(cid, amount, shift_id=shift_id)
+        bot.send_message(cid, f"✅ Выплата записана: {_rub(amount)}",
+                         reply_markup=worker_menu_markup())
+        text, inline = _salary_screen(cid)
+        bot.send_message(cid, text, parse_mode="Markdown", reply_markup=inline)
+
+
+# ── 💸 Расходы ────────────────────────────────────────────────
+
+def _expenses_screen(cid: int):
+    """Текст и InlineKeyboard для экрана «Расходы»."""
+    shift    = db.get_active_shift(cid)
+    shift_id = shift['id'] if shift else None
+    by_cat   = db.get_expenses_by_category(cid, shift_id)
+    total_exp = sum(by_cat.values()) if by_cat else 0.0
+
+    paid        = db.get_total_payments(cid)
+    net_balance = paid - total_exp   # остаток из полученных выплат за вычетом расходов
+
+    label = "текущей вахты" if shift else "всего времени"
+    lines = [f"💸 *Расходы* ({label})\n"]
+    if by_cat:
+        for key, cat_label in EXPENSE_CATEGORIES:
+            if key in by_cat:
+                lines.append(f"{cat_label}: {_rub(by_cat[key])}")
+        lines += [
+            f"\n📊 Итого расходов:  {_rub(total_exp)}",
+            f"💵 Остаток из выплат: {_rub(net_balance)}",
+        ]
+    else:
+        lines.append("Расходов пока нет.")
+
+    inline = InlineKeyboardMarkup(row_width=2)
+    inline.add(InlineKeyboardButton(
+        "➕ Добавить расход", callback_data="expense_add"))
+    inline.add(
+        InlineKeyboardButton("📊 По категориям", callback_data="expense_by_cat"),
+        InlineKeyboardButton("📋 История",        callback_data="expense_history"),
+    )
+    return "\n".join(lines), inline
+
 
 @bot.message_handler(commands=['expenses'])
 @bot.message_handler(func=lambda m: m.text == '💸 Расходы')
-def expenses(message):
-    bot.send_message(message.chat.id, "💸 Раздел расходов")
+def expenses_menu(message):
+    text, inline = _expenses_screen(message.chat.id)
+    bot.send_message(message.chat.id, text,
+                     parse_mode="Markdown", reply_markup=inline)
+
+
+@bot.callback_query_handler(func=lambda c: c.data == 'expense_add')
+def cb_expense_add(call):
+    bot.answer_callback_query(call.id)
+    inline = InlineKeyboardMarkup(row_width=2)
+    for key, label in EXPENSE_CATEGORIES:
+        inline.add(InlineKeyboardButton(
+            label, callback_data=f"expense_cat:{key}"))
+    bot.send_message(
+        call.message.chat.id,
+        "💸 *Добавить расход*\n\nВыберите категорию:",
+        parse_mode="Markdown", reply_markup=inline)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith('expense_cat:'))
+def cb_expense_category(call):
+    cid     = call.message.chat.id
+    cat_key = call.data.split(':')[1]
+    label   = EXPENSE_CAT_LABEL.get(cat_key, cat_key)
+    shift   = db.get_active_shift(cid)
+    bot.answer_callback_query(call.id)
+    expense_states[cid] = {
+        'step':     'amount',
+        'category': cat_key,
+        'shift_id': shift['id'] if shift else None,
+    }
+    bot.send_message(
+        cid,
+        f"💸 {label}\n\nВведите сумму расхода (например: 500):\n\nДля отмены: /cancel",
+        parse_mode="Markdown",
+        reply_markup=ReplyKeyboardRemove())
+
+
+@bot.callback_query_handler(func=lambda c: c.data == 'expense_by_cat')
+def cb_expense_by_cat(call):
+    cid = call.message.chat.id
+    bot.answer_callback_query(call.id)
+    shift    = db.get_active_shift(cid)
+    shift_id = shift['id'] if shift else None
+    by_cat   = db.get_expenses_by_category(cid, shift_id)
+    if not by_cat:
+        bot.send_message(cid, "📊 Расходов пока нет.")
+        return
+    lines = ["📊 *Расходы по категориям*\n"]
+    total = 0.0
+    for key, label in EXPENSE_CATEGORIES:
+        if key in by_cat:
+            total += by_cat[key]
+            lines.append(f"{label}: {_rub(by_cat[key])}")
+    lines.append(f"\n📊 Итого: {_rub(total)}")
+    bot.send_message(cid, "\n".join(lines), parse_mode="Markdown")
+
+
+@bot.callback_query_handler(func=lambda c: c.data == 'expense_history')
+def cb_expense_history(call):
+    cid = call.message.chat.id
+    bot.answer_callback_query(call.id)
+    records = db.get_expenses(cid, limit=15)
+    if not records:
+        bot.send_message(cid, "📋 История расходов пуста.")
+        return
+    lines = ["📋 *История расходов*\n"]
+    for e in records:
+        cat_label = EXPENSE_CAT_LABEL.get(e['category'], e['category'])
+        date_str  = (e['created_at'] or '')[:10]
+        note      = f" — {e['note']}" if e.get('note') else ""
+        lines.append(f"• {cat_label}: {_rub(e['amount'])}{note}  ({date_str})")
+    lines.append(f"\n📊 Итого: {_rub(db.get_total_expenses(cid))}")
+    bot.send_message(cid, "\n".join(lines), parse_mode="Markdown")
+
+
+@bot.message_handler(func=lambda m: m.chat.id in expense_states)
+def handle_expense_input(message):
+    cid   = message.chat.id
+    state = expense_states[cid]
+    raw   = message.text.strip().replace(' ', '').replace(',', '.')
+    try:
+        amount = float(raw)
+        if amount <= 0:
+            raise ValueError
+    except ValueError:
+        bot.send_message(cid, "⚠️ Введите положительное число (например: 500):")
+        return
+    cat_key  = state['category']
+    shift_id = state.get('shift_id')
+    expense_states.pop(cid)
+    db.add_expense(cid, cat_key, amount, shift_id=shift_id)
+    label = EXPENSE_CAT_LABEL.get(cat_key, cat_key)
+    bot.send_message(
+        cid, f"✅ Расход записан: {label} — {_rub(amount)}",
+        reply_markup=worker_menu_markup())
+    text, inline = _expenses_screen(cid)
+    bot.send_message(cid, text, parse_mode="Markdown", reply_markup=inline)
 
 def _vacancy_card(vac, index, total):
     """Формирует текст карточки вакансии."""
@@ -484,6 +881,15 @@ def cancel(message):
     elif cid in chat_states:
         chat_states.pop(cid)
         bot.send_message(cid, "❌ Отправка сообщения отменена.", reply_markup=main_menu_markup())
+    elif cid in shift_states:
+        shift_states.pop(cid)
+        bot.send_message(cid, "❌ Ввод отменён.", reply_markup=worker_menu_markup())
+    elif cid in salary_states:
+        salary_states.pop(cid)
+        bot.send_message(cid, "❌ Ввод отменён.", reply_markup=worker_menu_markup())
+    elif cid in expense_states:
+        expense_states.pop(cid)
+        bot.send_message(cid, "❌ Ввод отменён.", reply_markup=worker_menu_markup())
     else:
         bot.send_message(cid, "Нечего отменять.", reply_markup=main_menu_markup())
 
@@ -514,11 +920,42 @@ def handle_questionnaire(message):
 
 @bot.message_handler(func=lambda m: m.text == '📊 Отчёт')
 def report(message):
-    bot.send_message(message.chat.id,
-        "📊 Ваш отчёт:\n\n"
-        "💰 Доходы: 0\n"
-        "💸 Расходы: 0\n"
-        "📈 Баланс: 0")
+    cid   = message.chat.id
+    shift = db.get_active_shift(cid)
+
+    if shift:
+        start       = _date.fromisoformat(shift['start_date'])
+        worked_days = (_date.today() - start).days + 1
+        planned     = shift['planned_days']
+        shift_line  = f"⛺ {start.strftime('%d.%m.%Y')} — сейчас ({worked_days} дн.)"
+        if planned:
+            remaining  = max(0, planned - worked_days)
+            shift_line += f", осталось {remaining} дн."
+    else:
+        worked_days = 0
+        shift_line  = "⛺ Нет активной вахты"
+
+    daily_rate    = db.get_daily_rate(cid) or 0.0
+    accrued       = daily_rate * worked_days
+    paid          = db.get_total_payments(cid)
+    salary_remain = accrued - paid
+    total_exp     = db.get_total_expenses(cid)
+    net           = paid - total_exp
+
+    rate_str = f"{_rub(daily_rate)}/день" if daily_rate else "не задана"
+
+    bot.send_message(
+        cid,
+        f"📊 *Финансовый отчёт*\n\n"
+        f"{shift_line}\n\n"
+        f"💰 *Зарплата:*\n"
+        f"• Ставка: {rate_str}\n"
+        f"• Начислено: {_rub(accrued)}\n"
+        f"• Получено: {_rub(paid)}\n"
+        f"• Задолженность: {_rub(salary_remain)}\n\n"
+        f"💸 *Расходы:* {_rub(total_exp)}\n"
+        f"💵 *Чистый остаток:* {_rub(net)}",
+        parse_mode="Markdown")
 
 @bot.message_handler(func=lambda m: m.text == '❓ Помощь')
 def help_info(message):

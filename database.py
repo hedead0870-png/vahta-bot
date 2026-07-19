@@ -137,6 +137,43 @@ def init_db():
                 created_at   TEXT    DEFAULT (datetime('now')),
                 UNIQUE(company_name, profession, city, source_url)
             );
+
+            -- Личный кабинет работника: вахты, зарплата, расходы
+
+            CREATE TABLE IF NOT EXISTS shifts (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id      INTEGER NOT NULL,
+                start_date   TEXT    NOT NULL,
+                end_date     TEXT,
+                planned_days INTEGER,
+                note         TEXT,
+                created_at   TEXT    DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS worker_salary (
+                chat_id      INTEGER PRIMARY KEY,
+                daily_rate   REAL    NOT NULL DEFAULT 0,
+                updated_at   TEXT    DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS salary_payments (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id      INTEGER NOT NULL,
+                shift_id     INTEGER,
+                amount       REAL    NOT NULL,
+                note         TEXT,
+                created_at   TEXT    DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS expenses (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id      INTEGER NOT NULL,
+                shift_id     INTEGER,
+                category     TEXT    NOT NULL,
+                amount       REAL    NOT NULL,
+                note         TEXT,
+                created_at   TEXT    DEFAULT (datetime('now'))
+            );
         """)
         # Миграции: добавить колонки если таблица уже существует без них
         cols = [r[1] for r in conn.execute("PRAGMA table_info(vacancies)").fetchall()]
@@ -917,6 +954,173 @@ def count_official_vacancies_by_company(company_name: str) -> int:
             (company_name,)
         ).fetchone()
         return row['cnt'] if row else 0
+
+# ─────────────────────────────────────────────────────────────
+
+# ── Вахты (личный кабинет работника) ─────────────────────────
+
+def start_shift(chat_id: int, start_date: str,
+                planned_days: int | None = None,
+                note: str | None = None) -> int:
+    """Начинает новую вахту. Возвращает id записи."""
+    with get_conn() as conn:
+        cur = conn.execute(
+            """INSERT INTO shifts (chat_id, start_date, planned_days, note)
+               VALUES (?, ?, ?, ?)""",
+            (chat_id, start_date, planned_days, note)
+        )
+        return cur.lastrowid
+
+def end_shift(shift_id: int, end_date: str) -> None:
+    """Устанавливает дату окончания вахты."""
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE shifts SET end_date = ? WHERE id = ?",
+            (end_date, shift_id)
+        )
+
+def get_active_shift(chat_id: int) -> dict | None:
+    """Возвращает текущую незавершённую вахту или None."""
+    with get_conn() as conn:
+        row = conn.execute(
+            """SELECT * FROM shifts
+               WHERE chat_id = ? AND end_date IS NULL
+               ORDER BY id DESC LIMIT 1""",
+            (chat_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+def get_shifts_history(chat_id: int, limit: int = 10) -> list:
+    """Возвращает историю вахт (включая активную), новые первыми."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM shifts WHERE chat_id = ? ORDER BY id DESC LIMIT ?",
+            (chat_id, limit)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+# ── Зарплата (личный кабинет работника) ───────────────────────
+
+def set_daily_rate(chat_id: int, daily_rate: float) -> None:
+    """Устанавливает дневную ставку (upsert по chat_id)."""
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT INTO worker_salary (chat_id, daily_rate, updated_at)
+               VALUES (?, ?, datetime('now'))
+               ON CONFLICT(chat_id) DO UPDATE SET
+                   daily_rate = excluded.daily_rate,
+                   updated_at = excluded.updated_at""",
+            (chat_id, daily_rate)
+        )
+
+def get_daily_rate(chat_id: int) -> float | None:
+    """Возвращает текущую дневную ставку или None."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT daily_rate FROM worker_salary WHERE chat_id = ?",
+            (chat_id,)
+        ).fetchone()
+        return float(row["daily_rate"]) if row else None
+
+def add_salary_payment(chat_id: int, amount: float,
+                        shift_id: int | None = None,
+                        note: str | None = None) -> int:
+    """Добавляет запись о выплате. Возвращает id."""
+    with get_conn() as conn:
+        cur = conn.execute(
+            """INSERT INTO salary_payments (chat_id, shift_id, amount, note)
+               VALUES (?, ?, ?, ?)""",
+            (chat_id, shift_id, amount, note)
+        )
+        return cur.lastrowid
+
+def get_salary_payments(chat_id: int, limit: int = 20) -> list:
+    """Возвращает историю выплат, новые первыми."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT * FROM salary_payments
+               WHERE chat_id = ? ORDER BY id DESC LIMIT ?""",
+            (chat_id, limit)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+def get_total_payments(chat_id: int) -> float:
+    """Сумма всех полученных выплат."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(amount), 0) AS total FROM salary_payments WHERE chat_id = ?",
+            (chat_id,)
+        ).fetchone()
+        return float(row["total"])
+
+# ── Расходы (личный кабинет работника) ────────────────────────
+
+def add_expense(chat_id: int, category: str, amount: float,
+                note: str | None = None,
+                shift_id: int | None = None) -> int:
+    """Добавляет расход. Возвращает id."""
+    with get_conn() as conn:
+        cur = conn.execute(
+            """INSERT INTO expenses (chat_id, shift_id, category, amount, note)
+               VALUES (?, ?, ?, ?, ?)""",
+            (chat_id, shift_id, category, amount, note)
+        )
+        return cur.lastrowid
+
+def get_expenses(chat_id: int,
+                 shift_id: int | None = None,
+                 limit: int = 20) -> list:
+    """Возвращает расходы. Если shift_id задан — фильтрует по вахте."""
+    with get_conn() as conn:
+        if shift_id is not None:
+            rows = conn.execute(
+                """SELECT * FROM expenses
+                   WHERE chat_id = ? AND shift_id = ?
+                   ORDER BY id DESC LIMIT ?""",
+                (chat_id, shift_id, limit)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM expenses WHERE chat_id = ? ORDER BY id DESC LIMIT ?",
+                (chat_id, limit)
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+def get_expenses_by_category(chat_id: int,
+                              shift_id: int | None = None) -> dict:
+    """Возвращает суммы расходов по категориям {key: total}."""
+    with get_conn() as conn:
+        if shift_id is not None:
+            rows = conn.execute(
+                """SELECT category, SUM(amount) AS total FROM expenses
+                   WHERE chat_id = ? AND shift_id = ?
+                   GROUP BY category""",
+                (chat_id, shift_id)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT category, SUM(amount) AS total FROM expenses
+                   WHERE chat_id = ?
+                   GROUP BY category""",
+                (chat_id,)
+            ).fetchall()
+        return {r["category"]: float(r["total"]) for r in rows}
+
+def get_total_expenses(chat_id: int, shift_id: int | None = None) -> float:
+    """Сумма всех расходов (по вахте или всего)."""
+    with get_conn() as conn:
+        if shift_id is not None:
+            row = conn.execute(
+                """SELECT COALESCE(SUM(amount), 0) AS total FROM expenses
+                   WHERE chat_id = ? AND shift_id = ?""",
+                (chat_id, shift_id)
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT COALESCE(SUM(amount), 0) AS total FROM expenses WHERE chat_id = ?",
+                (chat_id,)
+            ).fetchone()
+        return float(row["total"])
 
 # ─────────────────────────────────────────────────────────────
 

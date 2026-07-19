@@ -428,12 +428,92 @@ def handle_apply(call):
     employer_id = int(employer_id_str)
     vac_id = int(vac_id_str)
 
+    # Проверяем анкету работника
+    profile = db.get_profile(worker_id)
+    if not profile or not profile.get('name'):
+        bot.answer_callback_query(call.id, "⚠️ Сначала заполните анкету!")
+        bot.send_message(worker_id,
+            "⚠️ Чтобы откликнуться на вакансию, сначала заполните анкету.\n"
+            "Перейдите в раздел 🔍 Ищу работу → 👤 Мои данные.")
+        return
+
+    # Проверяем повторный отклик
     added = db.add_response(worker_id, employer_id, vac_id)
-    if added:
-        bot.answer_callback_query(call.id, "✅ Отклик отправлен!")
-        bot.send_message(worker_id, "📩 Ваш отклик отправлен работодателю.")
-    else:
+    if not added:
         bot.answer_callback_query(call.id, "Вы уже откликались на эту вакансию.")
+        bot.send_message(worker_id, "ℹ️ Вы уже откликались на эту вакансию.")
+        return
+
+    bot.answer_callback_query(call.id, "✅ Отклик отправлен!")
+
+    # Сообщение работнику
+    bot.send_message(worker_id,
+        "✅ Ваш отклик успешно отправлен работодателю.\n"
+        "Ожидайте — работодатель свяжется с вами.")
+
+    # Получаем данные вакансии
+    vac = db.get_vacancy_by_id(vac_id) or {}
+
+    # Уведомление работодателю
+    lines = [
+        "📩 *Новый отклик!*\n",
+        f"📌 Вакансия: *{vac.get('profession', '—')}* ({vac.get('company', '—')})\n",
+        "👤 *Кандидат:*",
+        f"• Имя: {profile.get('name', '—')}",
+        f"• 📞 Телефон: {profile.get('phone', '—')}",
+        f"• 📍 Город: {profile.get('city', '—')}",
+        f"• 🔧 Профессия: {profile.get('profession', '—')}",
+        f"• 📋 Опыт: {profile.get('experience', '—')} лет",
+        f"• 💰 Желаемая зарплата: {profile.get('salary', '—')}",
+        f"• ⛺ Желаемая вахта: {profile.get('shift', '—')}",
+    ]
+    inline = InlineKeyboardMarkup(row_width=2)
+    inline.add(
+        InlineKeyboardButton("👤 Открыть профиль", callback_data=f"view_profile:{worker_id}"),
+        InlineKeyboardButton("📞 Связаться",        callback_data=f"contact:{worker_id}"),
+    )
+    try:
+        bot.send_message(employer_id, "\n".join(lines), parse_mode="Markdown", reply_markup=inline)
+    except Exception:
+        pass  # работодатель мог не запустить бота
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('view_profile:'))
+def handle_view_profile(call):
+    employer_id = call.message.chat.id
+    worker_id = int(call.data.split(':')[1])
+    profile = db.get_profile(worker_id)
+    bot.answer_callback_query(call.id)
+    if not profile:
+        bot.send_message(employer_id, "⚠️ Анкета кандидата не найдена.")
+        return
+    lines = [
+        "👤 *Профиль кандидата*\n",
+        f"• Имя: {profile.get('name', '—')}",
+        f"• 📞 Телефон: {profile.get('phone', '—')}",
+        f"• 📍 Город: {profile.get('city', '—')}",
+        f"• 🔧 Профессия: {profile.get('profession', '—')}",
+        f"• 📋 Опыт: {profile.get('experience', '—')} лет",
+        f"• 💰 Желаемая зарплата: {profile.get('salary', '—')}",
+        f"• ⛺ Желаемая вахта: {profile.get('shift', '—')}",
+    ]
+    bot.send_message(employer_id, "\n".join(lines), parse_mode="Markdown")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('contact:'))
+def handle_contact(call):
+    employer_id = call.message.chat.id
+    worker_id = int(call.data.split(':')[1])
+    profile = db.get_profile(worker_id)
+    bot.answer_callback_query(call.id)
+    if not profile:
+        bot.send_message(employer_id, "⚠️ Кандидат не найден.")
+        return
+    name  = profile.get('name', '—')
+    phone = profile.get('phone', '—')
+    bot.send_message(employer_id,
+        f"📞 *Контакт кандидата*\n\n"
+        f"👤 {name}\n"
+        f"📞 {phone}",
+        parse_mode="Markdown")
 
 @bot.message_handler(func=lambda m: m.text == '📩 Отклики')
 def employer_responses(message):
@@ -442,9 +522,10 @@ def employer_responses(message):
     if not vac_list:
         bot.send_message(cid, "У вас нет вакансий.")
         return
+
     resp_rows = db.get_responses_for_employer(cid)
     # Группируем отклики по vac_id
-    resp_map = {}
+    resp_map: dict[int, list[int]] = {}
     for r in resp_rows:
         resp_map.setdefault(r['vac_id'], []).append(r['worker_id'])
 
@@ -454,15 +535,32 @@ def employer_responses(message):
         if not worker_ids:
             continue
         has_any = True
-        lines = [f"📋 *{vac.get('profession', '—')}* ({vac.get('city', '—')}) — откликнулись: {len(worker_ids)}\n"]
+        status_emoji = STATUS_EMOJI.get(vac.get('status', 'active'), '🟢')
+        header = (
+            f"📋 *{vac.get('profession', '—')}* — {vac.get('company', '—')} "
+            f"({vac.get('city', '—')}) {status_emoji}\n"
+            f"👥 Откликнулись: {len(worker_ids)}\n"
+        )
+        bot.send_message(cid, header, parse_mode="Markdown")
+
         for w_id in worker_ids:
             profile = db.get_profile(w_id) or {}
-            lines.append(
-                f"👤 {profile.get('name', '—')} | "
-                f"{profile.get('profession', '—')} | "
-                f"📞 {profile.get('phone', '—')}"
+            card = (
+                f"👤 *{profile.get('name', '—')}*\n"
+                f"• 📞 {profile.get('phone', '—')}\n"
+                f"• 📍 {profile.get('city', '—')}\n"
+                f"• 🔧 {profile.get('profession', '—')}\n"
+                f"• 📋 Опыт: {profile.get('experience', '—')} лет\n"
+                f"• 💰 {profile.get('salary', '—')}\n"
+                f"• ⛺ {profile.get('shift', '—')}"
             )
-        bot.send_message(cid, "\n".join(lines), parse_mode="Markdown")
+            inline = InlineKeyboardMarkup(row_width=2)
+            inline.add(
+                InlineKeyboardButton("👤 Открыть профиль", callback_data=f"view_profile:{w_id}"),
+                InlineKeyboardButton("📞 Связаться",        callback_data=f"contact:{w_id}"),
+            )
+            bot.send_message(cid, card, parse_mode="Markdown", reply_markup=inline)
+
     if not has_any:
         bot.send_message(cid, "📩 Откликов пока нет.")
 

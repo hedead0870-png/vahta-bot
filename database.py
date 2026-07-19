@@ -116,6 +116,23 @@ def get_vacancies_by_city(city):
         ).fetchall()
         return [dict(r) for r in rows]
 
+def search_vacancies(profession=None, city=None):
+    """Поиск активных вакансий по профессии (LIKE) и городу (точное, регистронезависимое).
+    Если city=None — ищет по всем городам.
+    """
+    conditions = ["status = 'active'"]
+    params = []
+    if profession:
+        conditions.append("LOWER(profession) LIKE LOWER(?)")
+        params.append(f"%{profession.strip()}%")
+    if city:
+        conditions.append("LOWER(city) = LOWER(?)")
+        params.append(city.strip())
+    sql = "SELECT * FROM vacancies WHERE " + " AND ".join(conditions)
+    with get_conn() as conn:
+        rows = conn.execute(sql, params).fetchall()
+        return [dict(r) for r in rows]
+
 def get_vacancy_by_id(vac_id):
     with get_conn() as conn:
         row = conn.execute("SELECT * FROM vacancies WHERE id = ?", (vac_id,)).fetchone()

@@ -14,11 +14,16 @@ A Telegram bot built with Python and pyTelegramBotAPI.
 
 ## Configuration
 
-- `TOKEN` — Telegram bot API token (stored as a Replit Secret, never hardcoded)
-- `config.py` reads `TOKEN` from the environment via `os.getenv("TOKEN")`
+- `TOKEN` — Telegram bot API token (stored as a Replit Secret, from @BotFather)
+- `ADMIN_ID` — Numeric Telegram user ID of the bot admin (stored as a Replit Secret)
+- `config.py` reads both from the environment via `os.getenv(...)`
+
+## Database
+
+- SQLite (`vahta.db`) — created automatically on first run via `database.py`
 
 ## User preferences
 
-- Use `TOKEN` environment variable for the Telegram bot token — never hardcode it.
+- Use `TOKEN` and `ADMIN_ID` environment variables — never hardcode them.
 - Install dependencies from `requirements.txt`.
 - Start the bot with `python main.py`.

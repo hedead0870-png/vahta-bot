@@ -133,7 +133,7 @@ def worker_menu_markup():
     markup.add(KeyboardButton('👤 Мои данные'), KeyboardButton('⛺ Моя вахта'))
     markup.add(KeyboardButton('💰 Зарплата'), KeyboardButton('💸 Расходы'))
     markup.add(KeyboardButton('🔍 Найти работу'), KeyboardButton('🔔 Подписка'))
-    markup.add(KeyboardButton('🗑 Удалить анкету'))
+    markup.add(KeyboardButton('📬 Мои отклики'), KeyboardButton('🗑 Удалить анкету'))
     markup.add(KeyboardButton('📊 Отчёт'), KeyboardButton('❓ Помощь'))
     markup.add(KeyboardButton('🏠 Главное меню'))
     return markup
@@ -798,12 +798,13 @@ def handle_apply(call):
         bot.answer_callback_query(call.id, "⚠️ Сначала заполните анкету!")
         bot.send_message(worker_id,
             "⚠️ Чтобы откликнуться на вакансию, сначала заполните анкету.\n"
-            "Перейдите в раздел 🔍 Ищу работу → 👤 Мои данные.")
+            "Перейдите в раздел 🔍 Ищу работу → 👤 Мои данные.",
+            reply_markup=worker_menu_markup())
         return
 
-    # Проверяем повторный отклик
-    added = db.add_response(worker_id, employer_id, vac_id)
-    if not added:
+    # Создаём заявку в applications
+    app_id = db.add_application(vac_id, worker_id, employer_id)
+    if not app_id:
         bot.answer_callback_query(call.id, "Вы уже откликались на эту вакансию.")
         bot.send_message(worker_id, "ℹ️ Вы уже откликались на эту вакансию.")
         return
@@ -812,30 +813,33 @@ def handle_apply(call):
 
     # Сообщение работнику
     bot.send_message(worker_id,
-        "✅ Ваш отклик успешно отправлен работодателю.\n"
-        "Ожидайте — работодатель свяжется с вами.")
+        "✅ *Отклик отправлен!*\n\n"
+        "Работодатель рассмотрит вашу анкету и свяжется с вами.\n"
+        "Статус можно проверить в разделе 📬 Мои отклики.",
+        parse_mode="Markdown")
 
     # Получаем данные вакансии
     vac = db.get_vacancy_by_id(vac_id) or {}
 
     # Уведомление работодателю
     lines = [
-        "📩 *Новый отклик!*\n",
-        f"📌 Вакансия: *{vac.get('profession', '—')}* ({vac.get('company', '—')})\n",
+        "📩 *Новый отклик на вакансию!*\n",
+        f"🏢 Вакансия: *{vac.get('profession', '—')}* — {vac.get('company', '—')} ({vac.get('city', '—')})\n",
         "👤 *Кандидат:*",
-        f"• Имя: {profile.get('name', '—')}",
-        f"• 📞 Телефон: {profile.get('phone', '—')}",
-        f"• 📍 Город: {profile.get('city', '—')}",
-        f"• 🔧 Профессия: {profile.get('profession', '—')}",
-        f"• 📋 Опыт: {profile.get('experience', '—')} лет",
-        f"• 💰 Желаемая зарплата: {profile.get('salary', '—')}",
-        f"• ⛺ Желаемая вахта: {profile.get('shift', '—')}",
+        f"👤 Имя: {profile.get('name', '—')}",
+        f"🔧 Профессия: {profile.get('profession', '—')}",
+        f"🏙 Город: {profile.get('city', '—')}",
+        f"📋 Опыт: {profile.get('experience', '—')} лет",
+        f"💰 Желаемая зарплата: {profile.get('salary', '—')}",
+        f"⛺ Вахта: {profile.get('shift', '—')}",
+        f"📞 Телефон: {profile.get('phone', '—')}",
     ]
     inline = InlineKeyboardMarkup(row_width=2)
     inline.add(
-        InlineKeyboardButton("👤 Открыть профиль", callback_data=f"view_profile:{worker_id}"),
-        InlineKeyboardButton("📞 Связаться",        callback_data=f"contact:{worker_id}"),
+        InlineKeyboardButton("✅ Принять",  callback_data=f"app_accept:{app_id}"),
+        InlineKeyboardButton("❌ Отказать", callback_data=f"app_reject:{app_id}"),
     )
+    inline.add(InlineKeyboardButton("👤 Открыть профиль", callback_data=f"view_profile:{worker_id}"))
     try:
         bot.send_message(employer_id, "\n".join(lines), parse_mode="Markdown", reply_markup=inline)
     except Exception:
@@ -882,51 +886,129 @@ def handle_contact(call):
 @bot.message_handler(func=lambda m: m.text == '📩 Отклики')
 def employer_responses(message):
     cid = message.chat.id
-    vac_list = db.get_vacancies(cid)
-    if not vac_list:
-        bot.send_message(cid, "У вас нет вакансий.")
+    apps = db.get_applications_for_employer(cid)
+    if not apps:
+        bot.send_message(cid, "📩 Откликов пока нет.", reply_markup=employer_menu_markup())
         return
 
-    resp_rows = db.get_responses_for_employer(cid)
-    # Группируем отклики по vac_id
-    resp_map: dict[int, list[int]] = {}
-    for r in resp_rows:
-        resp_map.setdefault(r['vac_id'], []).append(r['worker_id'])
+    # Группируем заявки по вакансии
+    vac_groups: dict[int, list] = {}
+    for a in apps:
+        vac_groups.setdefault(a['vacancy_id'], []).append(a)
 
-    has_any = False
-    for vac in vac_list:
-        worker_ids = resp_map.get(vac['id'], [])
-        if not worker_ids:
-            continue
-        has_any = True
-        status_emoji = STATUS_EMOJI.get(vac.get('status', 'active'), '🟢')
+    bot.send_message(cid,
+        f"📩 *Отклики на ваши вакансии* — всего {len(apps)}:",
+        parse_mode="Markdown")
+
+    for vac_id, group in vac_groups.items():
+        first = group[0]
+        vac_emoji = STATUS_EMOJI.get(first.get('vac_status', 'active'), '🟢')
         header = (
-            f"📋 *{vac.get('profession', '—')}* — {vac.get('company', '—')} "
-            f"({vac.get('city', '—')}) {status_emoji}\n"
-            f"👥 Откликнулись: {len(worker_ids)}\n"
+            f"📋 *{first.get('profession', '—')}* — {first.get('company', '—')} "
+            f"({first.get('vac_city', '—')}) {vac_emoji}\n"
+            f"👥 Откликнулись: {len(group)}"
         )
         bot.send_message(cid, header, parse_mode="Markdown")
 
-        for w_id in worker_ids:
-            profile = db.get_profile(w_id) or {}
+        for a in group:
+            st_label = db.APPLICATION_STATUS_LABEL.get(a['status'], a['status'])
+            date = (a.get('created_at') or '')[:10]
             card = (
-                f"👤 *{profile.get('name', '—')}*\n"
-                f"• 📞 {profile.get('phone', '—')}\n"
-                f"• 📍 {profile.get('city', '—')}\n"
-                f"• 🔧 {profile.get('profession', '—')}\n"
-                f"• 📋 Опыт: {profile.get('experience', '—')} лет\n"
-                f"• 💰 {profile.get('salary', '—')}\n"
-                f"• ⛺ {profile.get('shift', '—')}"
+                f"👤 *{a.get('name') or '—'}*  {st_label}\n"
+                f"• 🔧 {a.get('worker_profession') or '—'}\n"
+                f"• 📍 {a.get('worker_city') or '—'}\n"
+                f"• 📋 Опыт: {a.get('experience') or '—'} лет\n"
+                f"• 💰 {a.get('worker_salary') or '—'}\n"
+                f"• ⛺ {a.get('shift') or '—'}\n"
+                f"• 📞 {a.get('phone') or '—'}\n"
+                f"_Дата: {date}_"
             )
+            # Кнопки зависят от статуса
             inline = InlineKeyboardMarkup(row_width=2)
-            inline.add(
-                InlineKeyboardButton("👤 Открыть профиль", callback_data=f"view_profile:{w_id}"),
-                InlineKeyboardButton("📞 Связаться",        callback_data=f"contact:{w_id}"),
-            )
+            if a['status'] not in ('accepted', 'rejected'):
+                inline.add(
+                    InlineKeyboardButton("✅ Принять",  callback_data=f"app_accept:{a['id']}"),
+                    InlineKeyboardButton("❌ Отказать", callback_data=f"app_reject:{a['id']}"),
+                )
+            inline.add(InlineKeyboardButton(
+                "👤 Профиль", callback_data=f"view_profile:{a['worker_id']}"))
             bot.send_message(cid, card, parse_mode="Markdown", reply_markup=inline)
+            # Помечаем просмотренным
+            db.mark_application_viewed(a['id'])
 
-    if not has_any:
-        bot.send_message(cid, "📩 Откликов пока нет.")
+@bot.callback_query_handler(func=lambda call: call.data.startswith('app_accept:'))
+def handle_app_accept(call):
+    employer_id = call.message.chat.id
+    app_id = int(call.data.split(':')[1])
+    app = db.get_application_by_id(app_id)
+    if not app or app['employer_id'] != employer_id:
+        bot.answer_callback_query(call.id, "Заявка не найдена.")
+        return
+    if app['status'] in ('accepted', 'rejected'):
+        bot.answer_callback_query(call.id, "Решение по этой заявке уже принято.")
+        return
+    worker_id = db.set_application_status(app_id, 'accepted')
+    bot.answer_callback_query(call.id, "✅ Отклик принят!")
+    # Обновляем кнопки
+    new_inline = InlineKeyboardMarkup()
+    new_inline.add(InlineKeyboardButton(
+        "👤 Профиль", callback_data=f"view_profile:{app['worker_id']}"))
+    try:
+        bot.edit_message_reply_markup(
+            employer_id, call.message.message_id, reply_markup=new_inline)
+    except Exception:
+        pass
+    bot.send_message(employer_id, "✅ Вы приняли отклик кандидата.")
+    # Уведомляем работника
+    if worker_id:
+        vac = db.get_vacancy_by_id(app['vacancy_id']) or {}
+        try:
+            bot.send_message(worker_id,
+                f"✅ *Работодатель принял ваш отклик!*\n\n"
+                f"🏢 Компания: {vac.get('company', '—')}\n"
+                f"👷 Вакансия: {vac.get('profession', '—')}\n"
+                f"📍 Город: {vac.get('city', '—')}\n"
+                f"📞 Контакт: {vac.get('contact', '—')}\n\n"
+                "Работодатель свяжется с вами в ближайшее время.",
+                parse_mode="Markdown")
+        except Exception:
+            pass
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('app_reject:'))
+def handle_app_reject(call):
+    employer_id = call.message.chat.id
+    app_id = int(call.data.split(':')[1])
+    app = db.get_application_by_id(app_id)
+    if not app or app['employer_id'] != employer_id:
+        bot.answer_callback_query(call.id, "Заявка не найдена.")
+        return
+    if app['status'] in ('accepted', 'rejected'):
+        bot.answer_callback_query(call.id, "Решение по этой заявке уже принято.")
+        return
+    worker_id = db.set_application_status(app_id, 'rejected')
+    bot.answer_callback_query(call.id, "❌ Отклик отклонён.")
+    # Обновляем кнопки
+    new_inline = InlineKeyboardMarkup()
+    new_inline.add(InlineKeyboardButton(
+        "👤 Профиль", callback_data=f"view_profile:{app['worker_id']}"))
+    try:
+        bot.edit_message_reply_markup(
+            employer_id, call.message.message_id, reply_markup=new_inline)
+    except Exception:
+        pass
+    bot.send_message(employer_id, "❌ Вы отказали кандидату.")
+    # Уведомляем работника
+    if worker_id:
+        vac = db.get_vacancy_by_id(app['vacancy_id']) or {}
+        try:
+            bot.send_message(worker_id,
+                f"❌ *Работодатель отказал по вашему отклику.*\n\n"
+                f"🏢 Компания: {vac.get('company', '—')}\n"
+                f"👷 Вакансия: {vac.get('profession', '—')}\n\n"
+                "Не расстраивайтесь — продолжайте поиск!",
+                parse_mode="Markdown")
+        except Exception:
+            pass
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('review:'))
 def handle_review_start(call):
@@ -1007,6 +1089,33 @@ def handle_toggle_vac(call):
 @bot.message_handler(func=lambda m: m.text == '👥 Найти работников')
 def find_workers(message):
     bot.send_message(message.chat.id, "👥 Раздел поиска работников — скоро будет доступен.")
+
+# ── Мои отклики (работник) ───────────────────────────────────
+
+@bot.message_handler(func=lambda m: m.text == '📬 Мои отклики')
+def my_applications(message):
+    cid = message.chat.id
+    apps = db.get_applications_for_worker(cid)
+    if not apps:
+        bot.send_message(cid,
+            "📬 У вас пока нет откликов.\n"
+            "Найдите вакансию через 🔍 Найти работу и откликнитесь.",
+            reply_markup=worker_menu_markup())
+        return
+    bot.send_message(cid,
+        f"📬 *Ваши отклики* — всего {len(apps)}:",
+        parse_mode="Markdown")
+    for a in apps:
+        st_label = db.APPLICATION_STATUS_LABEL.get(a['status'], a['status'])
+        date = (a.get('created_at') or '')[:10]
+        lines = [
+            f"🏢 *{a.get('company', '—')}*",
+            f"👷 {a.get('profession', '—')} — {a.get('vac_city', '—')}",
+            f"💰 {a.get('salary', '—')}",
+            f"📊 Статус: {st_label}",
+            f"_Дата отклика: {date}_",
+        ]
+        bot.send_message(cid, "\n".join(lines), parse_mode="Markdown")
 
 # ── Жалобы на работодателей ───────────────────────────────────
 

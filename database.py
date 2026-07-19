@@ -87,6 +87,16 @@ def init_db():
                 created_at  TEXT DEFAULT (datetime('now')),
                 UNIQUE(employer_id, user_id, reason)
             );
+
+            CREATE TABLE IF NOT EXISTS applications (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                vacancy_id  INTEGER NOT NULL,
+                worker_id   INTEGER NOT NULL,
+                employer_id INTEGER NOT NULL,
+                status      TEXT NOT NULL DEFAULT 'new',
+                created_at  TEXT DEFAULT (datetime('now')),
+                UNIQUE(worker_id, vacancy_id)
+            );
         """)
         # Миграции: добавить колонки если таблица уже существует без них
         cols = [r[1] for r in conn.execute("PRAGMA table_info(vacancies)").fetchall()]
@@ -190,7 +200,7 @@ def count_vacancies():
     with get_conn() as conn:
         return conn.execute("SELECT COUNT(*) FROM vacancies").fetchone()[0]
 
-# ── Отклики ───────────────────────────────────────────────────
+# ── Отклики (legacy) ─────────────────────────────────────────
 
 def add_response(worker_id, employer_id, vac_id):
     """Возвращает True если отклик добавлен, False если уже существует."""
@@ -211,6 +221,87 @@ def get_responses_for_employer(employer_id):
             "SELECT vac_id, worker_id FROM responses WHERE employer_id = ?", (employer_id,)
         ).fetchall()
         return [dict(r) for r in rows]
+
+# ── Заявки (applications) ─────────────────────────────────────
+
+APPLICATION_STATUSES = ('new', 'viewed', 'accepted', 'rejected')
+APPLICATION_STATUS_LABEL = {
+    'new':      '🆕 Новый',
+    'viewed':   '👁 Просмотрен',
+    'accepted': '✅ Принят',
+    'rejected': '❌ Отказан',
+}
+
+def add_application(vacancy_id, worker_id, employer_id):
+    """Создаёт заявку. Возвращает id новой заявки или None при дубликате."""
+    try:
+        with get_conn() as conn:
+            cur = conn.execute(
+                """INSERT INTO applications (vacancy_id, worker_id, employer_id)
+                   VALUES (?, ?, ?)""",
+                (vacancy_id, worker_id, employer_id)
+            )
+            return cur.lastrowid
+    except sqlite3.IntegrityError:
+        return None
+
+def get_application_by_id(app_id):
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM applications WHERE id = ?", (app_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+def set_application_status(app_id, status):
+    """Обновляет статус заявки. Возвращает worker_id для уведомления."""
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE applications SET status = ? WHERE id = ?", (status, app_id)
+        )
+        row = conn.execute(
+            "SELECT worker_id FROM applications WHERE id = ?", (app_id,)
+        ).fetchone()
+        return row['worker_id'] if row else None
+
+def get_applications_for_employer(employer_id):
+    """Заявки на вакансии работодателя, сгруппированные с данными кандидата и вакансии."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT a.id, a.vacancy_id, a.worker_id, a.status, a.created_at,
+                      v.profession, v.company, v.city  AS vac_city, v.status AS vac_status,
+                      u.name, u.phone, u.city AS worker_city,
+                      u.profession AS worker_profession, u.experience,
+                      u.salary AS worker_salary, u.shift
+               FROM applications a
+               JOIN vacancies v ON v.id = a.vacancy_id
+               LEFT JOIN users u ON u.chat_id = a.worker_id
+               WHERE a.employer_id = ?
+               ORDER BY a.created_at DESC""",
+            (employer_id,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+def get_applications_for_worker(worker_id):
+    """Заявки работника с данными вакансии."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT a.id, a.vacancy_id, a.employer_id, a.status, a.created_at,
+                      v.profession, v.company, v.city AS vac_city, v.salary
+               FROM applications a
+               JOIN vacancies v ON v.id = a.vacancy_id
+               WHERE a.worker_id = ?
+               ORDER BY a.created_at DESC""",
+            (worker_id,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+def mark_application_viewed(app_id):
+    """Помечает заявку просмотренной (только если статус 'new')."""
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE applications SET status = 'viewed' WHERE id = ? AND status = 'new'",
+            (app_id,)
+        )
 
 # ── Отзывы ────────────────────────────────────────────────────
 

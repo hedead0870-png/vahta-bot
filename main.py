@@ -230,6 +230,46 @@ def _vacancy_inline(vac, index, total):
         markup.add(InlineKeyboardButton("➡ Следующая вакансия", callback_data="next_vac"))
     return markup
 
+def _official_vacancy_card(vac, index, total):
+    """Формирует текст карточки официальной вакансии."""
+    lines = [
+        "🟢 *Вакансия с официального сайта*",
+        "",
+        f"🏢 Компания: {vac.get('company_name', '—')}",
+        f"👷 Профессия: {vac.get('profession', '—')}",
+        f"📍 Город: {vac.get('city', '—')}",
+        f"💰 Зарплата: {vac.get('salary') or '—'}",
+        f"⛺ График: {vac.get('schedule') or '—'}",
+        "",
+        f"_Вакансия {index} из {total}_",
+    ]
+    return "\n".join(lines)
+
+
+def _official_vacancy_inline(vac, index, total):
+    """Формирует inline-кнопки для карточки официальной вакансии."""
+    markup = InlineKeyboardMarkup(row_width=1)
+    if vac.get('source_url'):
+        markup.add(InlineKeyboardButton("🌐 Открыть оригинал", url=vac['source_url']))
+    if index < total:
+        markup.add(InlineKeyboardButton("➡ Следующая вакансия", callback_data="next_vac"))
+    return markup
+
+
+def _send_vac_card(cid, vac, index, total):
+    """Отправляет карточку вакансии нужного типа."""
+    if vac.get('_vac_type') == 'official':
+        bot.send_message(cid,
+            _official_vacancy_card(vac, index, total),
+            parse_mode="Markdown",
+            reply_markup=_official_vacancy_inline(vac, index, total))
+    else:
+        bot.send_message(cid,
+            _vacancy_card(vac, index, total),
+            parse_mode="Markdown",
+            reply_markup=_vacancy_inline(vac, index, total))
+
+
 @bot.message_handler(func=lambda m: m.text == '🔍 Найти работу')
 def find_job(message):
     cid = message.chat.id
@@ -262,7 +302,18 @@ def handle_search_input(message):
         city = None if text == ANY_CITY else text
         search_states.pop(cid)
 
-        found = db.search_vacancies(profession=profession, city=city)
+        # Обычные вакансии работодателей
+        regular = db.search_vacancies(profession=profession, city=city)
+        for v in regular:
+            v['_vac_type'] = 'regular'
+
+        # Официальные вакансии
+        official = db.get_official_vacancies(profession=profession, city=city, limit=50)
+        for v in official:
+            v['_vac_type'] = 'official'
+
+        found = regular + official
+
         if not found:
             city_label = city if city else "любой город"
             bot.send_message(cid,
@@ -276,10 +327,7 @@ def handle_search_input(message):
         bot.send_message(cid,
             f"✅ Найдено вакансий: {len(found)}",
             reply_markup=worker_menu_markup())
-        bot.send_message(cid,
-            _vacancy_card(vac, 1, len(found)),
-            parse_mode="Markdown",
-            reply_markup=_vacancy_inline(vac, 1, len(found)))
+        _send_vac_card(cid, vac, 1, len(found))
 
 # ── Подписки на вакансии ──────────────────────────────────────
 
@@ -787,10 +835,7 @@ def handle_next_vac(call):
     bot.answer_callback_query(call.id)
     vac = vacancies_list[idx]
     total = len(vacancies_list)
-    bot.send_message(cid,
-        _vacancy_card(vac, idx + 1, total),
-        parse_mode="Markdown",
-        reply_markup=_vacancy_inline(vac, idx + 1, total))
+    _send_vac_card(cid, vac, idx + 1, total)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('apply:'))
 def handle_apply(call):

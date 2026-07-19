@@ -1,0 +1,12 @@
+# Runtime database (auto-created on first run)
+vahta.db
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.env
+
+# Virtual environments
+venv/
+.venv/

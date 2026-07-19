@@ -1,26 +1,40 @@
 # vahta-bot
 
-A Telegram bot built with Python and pyTelegramBotAPI.
+A Telegram bot for shift workers (вахтовый метод). Matches job seekers with employers, handles vacancy postings, subscriptions, reviews, and an admin panel.
 
 ## How to run
 
-1. Set the `TOKEN` secret to your Telegram bot token (from @BotFather).
+1. Add the required secrets (see Configuration below).
 2. Start the **"Start application"** workflow — it runs `python main.py`.
+
+The bot connects to Telegram via long-polling and logs all activity to stdout.
 
 ## Stack
 
 - Python 3.12
 - [pyTelegramBotAPI](https://github.com/eternnoir/pyTelegramBotAPI)
+- SQLite (`vahta.db`) via `database.py` — created automatically on first run
+- `scheduler.py` — background thread that scrapes official job sites every 6 hours
 
 ## Configuration
 
-- `TOKEN` — Telegram bot API token (stored as a Replit Secret, from @BotFather)
-- `ADMIN_ID` — Numeric Telegram user ID of the bot admin (stored as a Replit Secret)
-- `config.py` reads both from the environment via `os.getenv(...)`
+Set these as Replit Secrets (never hardcode them):
 
-## Database
+| Secret | Description |
+|--------|-------------|
+| `TOKEN` | Telegram bot token from [@BotFather](https://t.me/BotFather) |
+| `ADMIN_ID` | Your numeric Telegram user ID (get it from [@userinfobot](https://t.me/userinfobot)) |
 
-- SQLite (`vahta.db`) — created automatically on first run via `database.py`
+`config.py` reads both via `os.getenv(...)`.
+
+## Dependencies
+
+Install with:
+```
+pip install -r requirements.txt
+```
+
+Requirements: `pyTelegramBotAPI`, `requests`, `beautifulsoup4`
 
 ## User preferences
 

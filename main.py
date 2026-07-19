@@ -43,19 +43,21 @@ STEP_LABELS = {
     'shift':      'Срок вахты',
 }
 
-VAC_STEPS = ['profession', 'city', 'company', 'salary', 'schedule', 'contact']
+VAC_STEPS = ['profession', 'city', 'company', 'inn', 'salary', 'schedule', 'contact']
 VAC_QUESTIONS = {
     'profession': "1️⃣ Название профессии:",
     'city':       "2️⃣ Город:",
     'company':    "3️⃣ Компания / объект:",
-    'salary':     "4️⃣ Зарплата (руб/мес):",
-    'schedule':   "5️⃣ График вахты (например: 30/30, 60/30):",
-    'contact':    "6️⃣ Контакт для связи (телефон или @username):",
+    'inn':        "4️⃣ ИНН организации (10 или 12 цифр):",
+    'salary':     "5️⃣ Зарплата (руб/мес):",
+    'schedule':   "6️⃣ График вахты (например: 30/30, 60/30):",
+    'contact':    "7️⃣ Контакт для связи (телефон или @username):",
 }
 VAC_LABELS = {
     'profession': 'Профессия',
     'city':       'Город',
     'company':    'Компания/объект',
+    'inn':        'ИНН',
     'salary':     'Зарплата',
     'schedule':   'График',
     'contact':    'Контакт',
@@ -153,6 +155,7 @@ def _vacancy_inline(vac, index, total):
         InlineKeyboardButton("📩 Откликнуться",   callback_data=f"apply:{vac['employer_id']}:{vac['id']}"),
         InlineKeyboardButton("⭐ Оставить отзыв", callback_data=f"review:{vac['employer_id']}:{vac['id']}"),
     )
+    markup.add(InlineKeyboardButton("🏢 Работодатель", callback_data=f"employer_card:{vac['employer_id']}"))
     if index < total:
         markup.add(InlineKeyboardButton("➡ Следующая вакансия", callback_data="next_vac"))
     return markup
@@ -529,6 +532,79 @@ def my_vacancies(message):
         inline.add(InlineKeyboardButton(toggle_label, callback_data=f"toggle_vac:{vac['id']}"))
         bot.send_message(cid, "\n".join(lines), parse_mode="Markdown", reply_markup=inline)
     bot.send_message(cid, f"Всего вакансий: {len(vac_list)}", reply_markup=employer_menu_markup())
+
+def _employer_card_text(card):
+    """Формирует текст карточки работодателя."""
+    avg = card["avg_rating"]
+    rating_str = f"⭐ {avg}" if avg else "нет отзывов"
+    lines = [
+        "🏢 *Карточка работодателя*\n",
+        f"🏢 Компания: *{card['company']}*",
+        f"🆔 ИНН: {card['inn'] or '—'}",
+        f"⭐ Средний рейтинг: {rating_str}",
+        f"💬 Отзывов: {card['review_count']}",
+        f"📋 Вакансий: {card['vacancy_count']}",
+        f"👥 Сотрудников оставили отзыв: {card['unique_workers']}",
+    ]
+    if avg is not None:
+        if avg < 3.5:
+            lines.append(
+                "\n⚠️ *У работодателя низкий рейтинг.*\n"
+                "Перед трудоустройством рекомендуем ознакомиться с отзывами."
+            )
+        elif avg >= 4.5:
+            lines.append("\n🟢 *Проверенный работодатель*")
+    return "\n".join(lines)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('employer_card:'))
+def handle_employer_card(call):
+    cid = call.message.chat.id
+    employer_id = int(call.data.split(':')[1])
+    bot.answer_callback_query(call.id)
+    card = db.get_employer_card(employer_id)
+    text = _employer_card_text(card)
+    inline = InlineKeyboardMarkup()
+    if card['review_count'] > 0:
+        inline.add(InlineKeyboardButton(
+            "📖 Все отзывы", callback_data=f"emp_reviews:{employer_id}:0"))
+    bot.send_message(cid, text, parse_mode="Markdown", reply_markup=inline)
+
+REVIEWS_PER_PAGE = 5
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('emp_reviews:'))
+def handle_emp_reviews(call):
+    cid = call.message.chat.id
+    _, employer_id_str, page_str = call.data.split(':')
+    employer_id = int(employer_id_str)
+    page = int(page_str)
+    bot.answer_callback_query(call.id)
+
+    reviews, total = db.get_employer_reviews_paged(employer_id, page, REVIEWS_PER_PAGE)
+    if not reviews:
+        bot.send_message(cid, "Отзывов пока нет.")
+        return
+
+    total_pages = (total + REVIEWS_PER_PAGE - 1) // REVIEWS_PER_PAGE
+    lines = [f"📖 *Отзывы о работодателе* (стр. {page + 1}/{total_pages})\n"]
+    for r in reviews:
+        stars = '⭐' * r['rating']
+        worker_name = r.get('worker_name') or 'Аноним'
+        review_text = r.get('text') or '_без текста_'
+        date = (r.get('created_at') or '')[:10]
+        lines.append(f"{stars} — *{worker_name}* ({date})\n{review_text}\n")
+
+    inline = InlineKeyboardMarkup(row_width=2)
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(
+            "← Назад", callback_data=f"emp_reviews:{employer_id}:{page - 1}"))
+    if (page + 1) < total_pages:
+        nav.append(InlineKeyboardButton(
+            "Вперёд →", callback_data=f"emp_reviews:{employer_id}:{page + 1}"))
+    if nav:
+        inline.add(*nav)
+
+    bot.send_message(cid, "\n".join(lines), parse_mode="Markdown", reply_markup=inline)
 
 @bot.callback_query_handler(func=lambda call: call.data == 'next_vac')
 def handle_next_vac(call):

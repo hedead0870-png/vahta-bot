@@ -62,10 +62,12 @@ def init_db():
                 UNIQUE(user_id, profession, city)
             );
         """)
-        # Миграция: добавить status если таблица уже существует без него
+        # Миграции: добавить колонки если таблица уже существует без них
         cols = [r[1] for r in conn.execute("PRAGMA table_info(vacancies)").fetchall()]
         if 'status' not in cols:
             conn.execute("ALTER TABLE vacancies ADD COLUMN status TEXT NOT NULL DEFAULT 'active'")
+        if 'inn' not in cols:
+            conn.execute("ALTER TABLE vacancies ADD COLUMN inn TEXT")
 
 # ── Профили работников ────────────────────────────────────────
 
@@ -104,9 +106,15 @@ def count_filled_profiles():
 def add_vacancy(employer_id, data):
     with get_conn() as conn:
         cur = conn.execute("""
-            INSERT INTO vacancies (employer_id, profession, city, company, salary, schedule, contact)
-            VALUES (:employer_id, :profession, :city, :company, :salary, :schedule, :contact)
-        """, {"employer_id": employer_id, **data})
+            INSERT INTO vacancies
+                (employer_id, profession, city, company, inn, salary, schedule, contact)
+            VALUES
+                (:employer_id, :profession, :city, :company, :inn, :salary, :schedule, :contact)
+        """, {
+            "employer_id": employer_id,
+            "inn": data.get("inn"),
+            **{k: data.get(k) for k in ("profession", "city", "company", "salary", "schedule", "contact")}
+        })
         return cur.lastrowid
 
 def get_vacancies(employer_id):
@@ -210,6 +218,49 @@ def get_employer_rating(employer_id):
             (employer_id,)
         ).fetchone()
         return (round(row['avg_r'], 1) if row['avg_r'] else None, row['cnt'])
+
+def get_employer_card(employer_id):
+    """Возвращает агрегированную карточку работодателя."""
+    with get_conn() as conn:
+        # Берём последнюю вакансию для имени компании и ИНН
+        vac_row = conn.execute(
+            "SELECT company, inn FROM vacancies WHERE employer_id = ? ORDER BY id DESC LIMIT 1",
+            (employer_id,)
+        ).fetchone()
+        vac_count = conn.execute(
+            "SELECT COUNT(*) FROM vacancies WHERE employer_id = ?", (employer_id,)
+        ).fetchone()[0]
+        rev_row = conn.execute(
+            """SELECT AVG(rating) as avg_r, COUNT(*) as cnt,
+                      COUNT(DISTINCT worker_id) as unique_workers
+               FROM reviews WHERE employer_id = ?""",
+            (employer_id,)
+        ).fetchone()
+    return {
+        "company":        vac_row["company"]  if vac_row else "—",
+        "inn":            vac_row["inn"]       if vac_row else "—",
+        "avg_rating":     round(rev_row["avg_r"], 1) if rev_row["avg_r"] else None,
+        "review_count":   rev_row["cnt"],
+        "vacancy_count":  vac_count,
+        "unique_workers": rev_row["unique_workers"],
+    }
+
+def get_employer_reviews_paged(employer_id, page=0, per_page=5):
+    """Возвращает (список отзывов на странице, общее кол-во отзывов)."""
+    with get_conn() as conn:
+        total = conn.execute(
+            "SELECT COUNT(*) FROM reviews WHERE employer_id = ?", (employer_id,)
+        ).fetchone()[0]
+        rows = conn.execute(
+            """SELECT r.*, u.name as worker_name
+               FROM reviews r
+               LEFT JOIN users u ON u.chat_id = r.worker_id
+               WHERE r.employer_id = ?
+               ORDER BY r.created_at DESC
+               LIMIT ? OFFSET ?""",
+            (employer_id, per_page, page * per_page)
+        ).fetchall()
+        return [dict(r) for r in rows], total
 
 def has_reviewed(worker_id, vac_id):
     """Проверяет, оставлял ли работник отзыв по этой вакансии."""

@@ -97,6 +97,23 @@ def init_db():
                 created_at  TEXT DEFAULT (datetime('now')),
                 UNIQUE(worker_id, vacancy_id)
             );
+
+            CREATE TABLE IF NOT EXISTS messages (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                application_id INTEGER NOT NULL,
+                sender_id      INTEGER NOT NULL,
+                receiver_id    INTEGER NOT NULL,
+                text           TEXT    NOT NULL,
+                created_at     TEXT    DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS blocks (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                blocker_id INTEGER NOT NULL,
+                blocked_id INTEGER NOT NULL,
+                created_at TEXT DEFAULT (datetime('now')),
+                UNIQUE(blocker_id, blocked_id)
+            );
         """)
         # Миграции: добавить колонки если таблица уже существует без них
         cols = [r[1] for r in conn.execute("PRAGMA table_info(vacancies)").fetchall()]
@@ -302,6 +319,60 @@ def mark_application_viewed(app_id):
             "UPDATE applications SET status = 'viewed' WHERE id = ? AND status = 'new'",
             (app_id,)
         )
+
+# ── Внутренний чат ────────────────────────────────────────────
+
+def save_message(application_id, sender_id, receiver_id, text):
+    """Сохраняет сообщение чата. Возвращает id записи."""
+    with get_conn() as conn:
+        cur = conn.execute(
+            """INSERT INTO messages (application_id, sender_id, receiver_id, text)
+               VALUES (?, ?, ?, ?)""",
+            (application_id, sender_id, receiver_id, text)
+        )
+        return cur.lastrowid
+
+def get_chat_history(application_id, limit=50):
+    """Возвращает историю сообщений по заявке (новые в конце)."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT id, sender_id, receiver_id, text, created_at
+               FROM messages WHERE application_id = ?
+               ORDER BY created_at DESC LIMIT ?""",
+            (application_id, limit)
+        ).fetchall()
+        return list(reversed([dict(r) for r in rows]))
+
+# ── Блокировки пользователей ──────────────────────────────────
+
+def block_user(blocker_id, blocked_id):
+    """Блокирует пользователя. Возвращает True при успехе, False если уже заблокирован."""
+    try:
+        with get_conn() as conn:
+            conn.execute(
+                "INSERT INTO blocks (blocker_id, blocked_id) VALUES (?, ?)",
+                (blocker_id, blocked_id)
+            )
+        return True
+    except sqlite3.IntegrityError:
+        return False
+
+def unblock_user(blocker_id, blocked_id):
+    """Снимает блокировку."""
+    with get_conn() as conn:
+        conn.execute(
+            "DELETE FROM blocks WHERE blocker_id = ? AND blocked_id = ?",
+            (blocker_id, blocked_id)
+        )
+
+def is_blocked(sender_id, receiver_id):
+    """Проверяет, заблокировал ли receiver_id отправителя sender_id."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM blocks WHERE blocker_id = ? AND blocked_id = ?",
+            (receiver_id, sender_id)
+        ).fetchone()
+        return row is not None
 
 # ── Отзывы ────────────────────────────────────────────────────
 

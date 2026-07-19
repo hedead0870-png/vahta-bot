@@ -58,6 +58,7 @@ search_states = PersistentDict('search_states')  # chat_id -> {'step': ..., 'pro
 search_results = PersistentDict('search_results')  # chat_id -> {'vacancies': [...], 'index': int}
 sub_states = PersistentDict('sub_states')        # chat_id -> {'step': ..., 'profession': ...}
 complaint_states = PersistentDict('complaint_states')  # chat_id -> {'employer_id', 'reason'}
+chat_states = PersistentDict('chat_states')          # chat_id -> {'app_id', 'receiver_id', 'my_role'}
 
 STATUS_EMOJI = {'active': '🟢', 'closed': '🔴'}
 STATUS_LABEL = {'active': 'Активна', 'closed': 'Закрыта'}
@@ -428,6 +429,12 @@ def cancel(message):
     elif cid in sub_states:
         sub_states.pop(cid)
         bot.send_message(cid, "❌ Создание подписки отменено.", reply_markup=worker_menu_markup())
+    elif cid in complaint_states:
+        complaint_states.pop(cid)
+        bot.send_message(cid, "❌ Жалоба отменена.", reply_markup=worker_menu_markup())
+    elif cid in chat_states:
+        chat_states.pop(cid)
+        bot.send_message(cid, "❌ Отправка сообщения отменена.", reply_markup=main_menu_markup())
     else:
         bot.send_message(cid, "Нечего отменять.", reply_markup=main_menu_markup())
 
@@ -958,10 +965,18 @@ def handle_app_accept(call):
             employer_id, call.message.message_id, reply_markup=new_inline)
     except Exception:
         pass
-    bot.send_message(employer_id, "✅ Вы приняли отклик кандидата.")
+    chat_inline_emp = InlineKeyboardMarkup()
+    chat_inline_emp.add(InlineKeyboardButton(
+        "💬 Написать работнику", callback_data=f"chat_open:{app_id}:employer"))
+    bot.send_message(employer_id,
+        "✅ Вы приняли отклик кандидата.\nТеперь вы можете написать ему напрямую.",
+        reply_markup=chat_inline_emp)
     # Уведомляем работника
     if worker_id:
         vac = db.get_vacancy_by_id(app['vacancy_id']) or {}
+        chat_inline_w = InlineKeyboardMarkup()
+        chat_inline_w.add(InlineKeyboardButton(
+            "💬 Написать работодателю", callback_data=f"chat_open:{app_id}:worker"))
         try:
             bot.send_message(worker_id,
                 f"✅ *Работодатель принял ваш отклик!*\n\n"
@@ -969,8 +984,9 @@ def handle_app_accept(call):
                 f"👷 Вакансия: {vac.get('profession', '—')}\n"
                 f"📍 Город: {vac.get('city', '—')}\n"
                 f"📞 Контакт: {vac.get('contact', '—')}\n\n"
-                "Работодатель свяжется с вами в ближайшее время.",
-                parse_mode="Markdown")
+                "Теперь вы можете написать работодателю напрямую.",
+                parse_mode="Markdown",
+                reply_markup=chat_inline_w)
         except Exception:
             pass
 
@@ -1229,6 +1245,113 @@ def admin_complaint_resolve(call):
     bot.edit_message_text(
         call.message.text + "\n\n✅ _Рассмотрена_",
         call.message.chat.id, call.message.message_id, parse_mode="Markdown")
+
+# ── Внутренний чат ───────────────────────────────────────────
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('chat_open:'))
+def handle_chat_open(call):
+    cid = call.message.chat.id
+    parts = call.data.split(':')
+    app_id   = int(parts[1])
+    my_role  = parts[2]          # 'employer' или 'worker'
+
+    app = db.get_application_by_id(app_id)
+    if not app or app['status'] != 'accepted':
+        bot.answer_callback_query(call.id, "💬 Чат доступен только для принятых откликов.")
+        return
+
+    # Определяем receiver
+    if my_role == 'employer':
+        if app['employer_id'] != cid:
+            bot.answer_callback_query(call.id, "🚫 Нет доступа.")
+            return
+        receiver_id = app['worker_id']
+    else:
+        if app['worker_id'] != cid:
+            bot.answer_callback_query(call.id, "🚫 Нет доступа.")
+            return
+        receiver_id = app['employer_id']
+
+    # Проверяем блокировку (заблокировал ли receiver нас)
+    if db.is_blocked(cid, receiver_id):
+        bot.answer_callback_query(call.id, "🚫 Вы не можете отправить сообщение этому пользователю.")
+        return
+
+    chat_states[cid] = {'app_id': app_id, 'receiver_id': receiver_id, 'my_role': my_role}
+    bot.answer_callback_query(call.id)
+    bot.send_message(cid,
+        "💬 Напишите сообщение (или /cancel для отмены):",
+        reply_markup=ReplyKeyboardRemove())
+
+@bot.message_handler(func=lambda m: m.chat.id in chat_states)
+def handle_chat_message(message):
+    cid   = message.chat.id
+    state = chat_states.pop(cid)
+    app_id      = state['app_id']
+    receiver_id = state['receiver_id']
+    my_role     = state['my_role']
+    text        = message.text.strip() if message.text else ''
+
+    if not text:
+        bot.send_message(cid, "⚠️ Пустое сообщение не отправлено.")
+        return
+
+    # Повторно проверяем блокировку
+    if db.is_blocked(cid, receiver_id):
+        bot.send_message(cid,
+            "🚫 Сообщение не доставлено — получатель вас заблокировал.",
+            reply_markup=main_menu_markup())
+        return
+
+    # Сохраняем в БД
+    db.save_message(app_id, cid, receiver_id, text)
+
+    # Подтверждение отправителю
+    bot.send_message(cid, "✅ Сообщение отправлено.")
+
+    # Формируем кнопки для получателя
+    receiver_role = 'worker' if my_role == 'employer' else 'employer'
+    sender_label  = "работодателя" if my_role == 'employer' else "кандидата"
+    reply_inline = InlineKeyboardMarkup(row_width=1)
+    reply_inline.add(
+        InlineKeyboardButton("💬 Ответить",          callback_data=f"chat_open:{app_id}:{receiver_role}"),
+        InlineKeyboardButton("🚫 Заблокировать",     callback_data=f"block_chat:{app_id}:{cid}"),
+    )
+
+    try:
+        bot.send_message(receiver_id,
+            f"💬 *Новое сообщение от {sender_label}:*\n\n{text}",
+            parse_mode="Markdown",
+            reply_markup=reply_inline)
+    except Exception:
+        bot.send_message(cid,
+            "⚠️ Сообщение сохранено, но не удалось доставить получателю.")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('block_chat:'))
+def handle_block_chat(call):
+    cid   = call.message.chat.id
+    parts = call.data.split(':')
+    app_id    = int(parts[1])
+    target_id = int(parts[2])
+
+    # Проверяем, что вызывающий — участник этой заявки
+    app = db.get_application_by_id(app_id)
+    if not app or cid not in (app['worker_id'], app['employer_id']):
+        bot.answer_callback_query(call.id, "🚫 Нет доступа.")
+        return
+
+    db.block_user(cid, target_id)
+    bot.answer_callback_query(call.id, "🚫 Пользователь заблокирован.")
+    # Убираем кнопки из исходного сообщения
+    try:
+        bot.edit_message_reply_markup(cid, call.message.message_id, reply_markup=None)
+    except Exception:
+        pass
+    bot.send_message(cid,
+        "🚫 *Пользователь заблокирован.*\n"
+        "Он больше не сможет отправлять вам сообщения через бота.\n\n"
+        "Если передумаете — обратитесь в поддержку.",
+        parse_mode="Markdown")
 
 # ── Прочие разделы ────────────────────────────────────────────
 

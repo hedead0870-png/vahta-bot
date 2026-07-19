@@ -69,6 +69,13 @@ def init_db():
                 updated_at TEXT    DEFAULT (datetime('now')),
                 PRIMARY KEY(chat_id, key)
             );
+
+            CREATE TABLE IF NOT EXISTS employer_status (
+                employer_id INTEGER PRIMARY KEY,
+                status      TEXT    NOT NULL DEFAULT 'new',
+                is_manual   INTEGER NOT NULL DEFAULT 0,
+                verified_at TEXT
+            );
         """)
         # Миграции: добавить колонки если таблица уже существует без них
         cols = [r[1] for r in conn.execute("PRAGMA table_info(vacancies)").fetchall()]
@@ -245,6 +252,7 @@ def get_employer_card(employer_id):
             (employer_id,)
         ).fetchone()
     return {
+        "employer_id":    employer_id,
         "company":        vac_row["company"]  if vac_row else "—",
         "inn":            vac_row["inn"]       if vac_row else "—",
         "avg_rating":     round(rev_row["avg_r"], 1) if rev_row["avg_r"] else None,
@@ -315,6 +323,80 @@ def delete_all_subscriptions(user_id):
     """Удаляет все подписки пользователя."""
     with get_conn() as conn:
         conn.execute("DELETE FROM subscriptions WHERE user_id = ?", (user_id,))
+
+# ── Статусы работодателей ────────────────────────────────────
+
+EMPLOYER_STATUSES = ('new', 'verified', 'complaints')
+
+def _compute_auto_status(avg_rating, review_count):
+    """Возвращает автоматический статус на основе рейтинга и числа отзывов."""
+    if not review_count or avg_rating is None:
+        return 'new'
+    if avg_rating < 3.5:
+        return 'complaints'
+    if avg_rating >= 4.5 and review_count >= 5:
+        return 'verified'
+    return 'new'
+
+def get_employer_status(employer_id):
+    """Возвращает dict {status, is_manual, verified_at}.
+    Если есть ручная установка — возвращает её; иначе вычисляет авто.
+    """
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT status, is_manual, verified_at FROM employer_status WHERE employer_id = ?",
+            (employer_id,)
+        ).fetchone()
+        if row and row['is_manual']:
+            return dict(row)
+    # Авто-вычисление
+    avg, cnt = get_employer_rating(employer_id)
+    return {'status': _compute_auto_status(avg, cnt), 'is_manual': 0, 'verified_at': None}
+
+def set_employer_status(employer_id, status, is_manual=True):
+    """Устанавливает статус работодателя (ручной или автоматический)."""
+    from datetime import datetime
+    verified_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S') if status == 'verified' else None
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT OR REPLACE INTO employer_status (employer_id, status, is_manual, verified_at)
+               VALUES (?, ?, ?, ?)""",
+            (employer_id, status, 1 if is_manual else 0, verified_at)
+        )
+
+def refresh_employer_status(employer_id):
+    """Пересчитывает и сохраняет авто-статус (не перезаписывает ручной)."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT is_manual FROM employer_status WHERE employer_id = ?", (employer_id,)
+        ).fetchone()
+        if row and row['is_manual']:
+            return  # ручная установка — не трогаем
+    avg, cnt = get_employer_rating(employer_id)
+    status = _compute_auto_status(avg, cnt)
+    from datetime import datetime
+    verified_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S') if status == 'verified' else None
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT OR REPLACE INTO employer_status (employer_id, status, is_manual, verified_at)
+               VALUES (?, ?, 0, ?)""",
+            (employer_id, status, verified_at)
+        )
+
+def get_all_employers_for_admin():
+    """Список всех работодателей (имевших хоть одну вакансию) со статусом — для админки."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT DISTINCT v.employer_id,
+                      (SELECT company FROM vacancies
+                       WHERE employer_id = v.employer_id ORDER BY id DESC LIMIT 1) AS company,
+                      COALESCE(es.status,    'new') AS status,
+                      COALESCE(es.is_manual, 0)     AS is_manual
+               FROM vacancies v
+               LEFT JOIN employer_status es ON es.employer_id = v.employer_id
+               ORDER BY v.employer_id"""
+        ).fetchall()
+        return [dict(r) for r in rows]
 
 # ── Сессии (промежуточные состояния диалогов) ────────────────
 

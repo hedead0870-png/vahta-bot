@@ -61,6 +61,21 @@ sub_states = PersistentDict('sub_states')        # chat_id -> {'step': ..., 'pro
 STATUS_EMOJI = {'active': '🟢', 'closed': '🔴'}
 STATUS_LABEL = {'active': 'Активна', 'closed': 'Закрыта'}
 
+# Статусы работодателей
+EMP_STATUS_LINE = {
+    'new':        '🟡 Новый работодатель',
+    'verified':   '🟢 Проверенный работодатель',
+    'complaints': '🔴 Есть жалобы',
+}
+EMP_STATUS_LABEL = {
+    'new':        '🟡 Новый',
+    'verified':   '🟢 Проверенный',
+    'complaints': '🔴 Есть жалобы',
+}
+EMP_STATUS_WARNING = {
+    'complaints': '⚠️ Перед трудоустройством изучите отзывы.',
+}
+
 ANY_CITY = '🌍 Любой город'
 
 STEPS = ['name', 'phone', 'city', 'profession', 'experience', 'salary', 'shift']
@@ -176,16 +191,22 @@ def _vacancy_card(vac, index, total):
     """Формирует текст карточки вакансии."""
     avg, cnt = db.get_employer_rating(vac['employer_id'])
     rating_str = f"⭐ {avg} ({cnt} отз.)" if avg else "нет отзывов"
+    emp_st = db.get_employer_status(vac['employer_id'])
+    status_line = EMP_STATUS_LINE.get(emp_st['status'], '🟡 Новый работодатель')
     lines = [
-        f"🏢 *{vac.get('company', '—')}*\n",
+        f"🏢 *{vac.get('company', '—')}*",
+        f"{status_line}",
+        f"⭐ Рейтинг: {avg}  💬 Отзывов: {cnt}" if avg else "💬 Отзывов пока нет",
+        "",
         f"👷 Профессия: {vac.get('profession', '—')}",
         f"📍 Город: {vac.get('city', '—')}",
         f"💰 Зарплата: {vac.get('salary', '—')}",
         f"⛺ График: {vac.get('schedule', '—')}",
         f"📞 Контакт: {vac.get('contact', '—')}",
-        f"⭐ Рейтинг работодателя: {rating_str}",
-        f"\n_Вакансия {index} из {total}_",
     ]
+    if emp_st['status'] == 'complaints':
+        lines.append("\n⚠️ Перед трудоустройством изучите отзывы.")
+    lines.append(f"\n_Вакансия {index} из {total}_")
     return "\n".join(lines)
 
 def _vacancy_inline(vac, index, total):
@@ -485,12 +506,83 @@ def admin_panel(message):
     if message.chat.id != ADMIN_ID:
         bot.send_message(message.chat.id, "🚫 Нет доступа.")
         return
+    inline = InlineKeyboardMarkup()
+    inline.add(InlineKeyboardButton("👷 Статусы работодателей", callback_data="admin_emp_list"))
     bot.send_message(message.chat.id,
         f"👨‍💼 *Админ панель*\n\n"
         f"👥 Пользователей в БД: {db.count_users()}\n"
         f"📋 Заполненных анкет: {db.count_filled_profiles()}\n"
         f"📌 Вакансий: {db.count_vacancies()}",
-        parse_mode="Markdown")
+        parse_mode="Markdown",
+        reply_markup=inline)
+
+# ── Админ: управление статусами работодателей ─────────────────
+
+def _is_admin(chat_id):
+    return chat_id == ADMIN_ID
+
+@bot.callback_query_handler(func=lambda call: call.data == 'admin_emp_list')
+def admin_emp_list(call):
+    if not _is_admin(call.message.chat.id):
+        bot.answer_callback_query(call.id, "🚫 Нет доступа.")
+        return
+    bot.answer_callback_query(call.id)
+    employers = db.get_all_employers_for_admin()
+    if not employers:
+        bot.send_message(call.message.chat.id, "👷 Работодателей пока нет.")
+        return
+    bot.send_message(call.message.chat.id, f"👷 *Работодатели* ({len(employers)}):", parse_mode="Markdown")
+    for emp in employers:
+        status_label = EMP_STATUS_LABEL.get(emp['status'], '🟡 Новый')
+        manual_mark = " _(вручную)_" if emp['is_manual'] else ""
+        text = f"🏢 *{emp['company'] or '—'}*\nСтатус: {status_label}{manual_mark}"
+        inline = InlineKeyboardMarkup()
+        inline.add(InlineKeyboardButton(
+            "✏️ Изменить статус", callback_data=f"admin_emp_info:{emp['employer_id']}"))
+        bot.send_message(call.message.chat.id, text, parse_mode="Markdown", reply_markup=inline)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('admin_emp_info:'))
+def admin_emp_info(call):
+    if not _is_admin(call.message.chat.id):
+        bot.answer_callback_query(call.id, "🚫 Нет доступа.")
+        return
+    bot.answer_callback_query(call.id)
+    employer_id = int(call.data.split(':')[1])
+    card = db.get_employer_card(employer_id)
+    emp_st = db.get_employer_status(employer_id)
+    current = EMP_STATUS_LABEL.get(emp_st['status'], '🟡 Новый')
+    avg = card['avg_rating']
+    text = (
+        f"🏢 *{card['company']}*\n"
+        f"⭐ Рейтинг: {avg if avg else '—'}  💬 Отзывов: {card['review_count']}\n"
+        f"Текущий статус: {current}\n\n"
+        f"Выберите новый статус:"
+    )
+    inline = InlineKeyboardMarkup(row_width=3)
+    inline.add(
+        InlineKeyboardButton("🟢 Проверенный", callback_data=f"admin_emp_set:{employer_id}:verified"),
+        InlineKeyboardButton("🟡 Новый",        callback_data=f"admin_emp_set:{employer_id}:new"),
+        InlineKeyboardButton("🔴 Есть жалобы",  callback_data=f"admin_emp_set:{employer_id}:complaints"),
+    )
+    bot.send_message(call.message.chat.id, text, parse_mode="Markdown", reply_markup=inline)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('admin_emp_set:'))
+def admin_emp_set(call):
+    if not _is_admin(call.message.chat.id):
+        bot.answer_callback_query(call.id, "🚫 Нет доступа.")
+        return
+    _, employer_id_str, status = call.data.split(':')
+    employer_id = int(employer_id_str)
+    if status not in db.EMPLOYER_STATUSES:
+        bot.answer_callback_query(call.id, "Неверный статус.")
+        return
+    db.set_employer_status(employer_id, status, is_manual=True)
+    label = EMP_STATUS_LABEL.get(status, status)
+    bot.answer_callback_query(call.id, f"✅ Статус установлен: {label}")
+    bot.edit_message_text(
+        f"✅ Статус работодателя обновлён:\n{label}",
+        call.message.chat.id, call.message.message_id
+    )
 
 # ── Меню работодателя ─────────────────────────────────────────
 
@@ -581,23 +673,26 @@ def _employer_card_text(card):
     """Формирует текст карточки работодателя."""
     avg = card["avg_rating"]
     rating_str = f"⭐ {avg}" if avg else "нет отзывов"
+    emp_st = db.get_employer_status(card['employer_id'])
+    status_label = EMP_STATUS_LABEL.get(emp_st['status'], '🟡 Новый')
+    manual_mark = " _(вручную)_" if emp_st['is_manual'] else ""
     lines = [
         "🏢 *Карточка работодателя*\n",
         f"🏢 Компания: *{card['company']}*",
         f"🆔 ИНН: {card['inn'] or '—'}",
+        f"📊 Статус: {status_label}{manual_mark}",
         f"⭐ Средний рейтинг: {rating_str}",
         f"💬 Отзывов: {card['review_count']}",
         f"📋 Вакансий: {card['vacancy_count']}",
         f"👥 Сотрудников оставили отзыв: {card['unique_workers']}",
     ]
-    if avg is not None:
-        if avg < 3.5:
-            lines.append(
-                "\n⚠️ *У работодателя низкий рейтинг.*\n"
-                "Перед трудоустройством рекомендуем ознакомиться с отзывами."
-            )
-        elif avg >= 4.5:
-            lines.append("\n🟢 *Проверенный работодатель*")
+    if emp_st['status'] == 'complaints':
+        lines.append(
+            "\n⚠️ *У работодателя есть жалобы.*\n"
+            "Перед трудоустройством рекомендуем ознакомиться с отзывами."
+        )
+    elif emp_st['status'] == 'verified':
+        lines.append("\n🟢 *Проверенный работодатель*")
     return "\n".join(lines)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('employer_card:'))
@@ -852,6 +947,7 @@ def review_skip(message):
     state = review_states.pop(cid)
     saved = db.add_review(cid, state['employer_id'], state['vac_id'], state['rating'], text=None)
     if saved:
+        db.refresh_employer_status(state['employer_id'])
         bot.send_message(cid, f"✅ Отзыв сохранён! Оценка: {'⭐' * state['rating']}")
     else:
         bot.send_message(cid, "Вы уже оставляли отзыв на эту вакансию.")
@@ -862,6 +958,7 @@ def handle_review_text(message):
     state = review_states.pop(cid)
     saved = db.add_review(cid, state['employer_id'], state['vac_id'], state['rating'], text=message.text)
     if saved:
+        db.refresh_employer_status(state['employer_id'])
         bot.send_message(cid,
             f"✅ Отзыв сохранён!\n"
             f"Оценка: {'⭐' * state['rating']}\n"

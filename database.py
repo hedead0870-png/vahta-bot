@@ -52,6 +52,15 @@ def init_db():
                 created_at  TEXT DEFAULT (datetime('now')),
                 UNIQUE(worker_id, vac_id)
             );
+
+            CREATE TABLE IF NOT EXISTS subscriptions (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id     INTEGER NOT NULL,
+                profession  TEXT NOT NULL,
+                city        TEXT,
+                created_at  TEXT DEFAULT (datetime('now')),
+                UNIQUE(user_id, profession, city)
+            );
         """)
         # Миграция: добавить status если таблица уже существует без него
         cols = [r[1] for r in conn.execute("PRAGMA table_info(vacancies)").fetchall()]
@@ -210,3 +219,67 @@ def has_reviewed(worker_id, vac_id):
             (worker_id, vac_id)
         ).fetchone()
         return row is not None
+
+# ── Подписки ─────────────────────────────────────────────────
+
+def add_subscription(user_id, profession, city):
+    """Добавляет подписку. city=None — любой город.
+    Возвращает id новой подписки или None если уже существует."""
+    try:
+        with get_conn() as conn:
+            cur = conn.execute(
+                "INSERT INTO subscriptions (user_id, profession, city) VALUES (?, ?, ?)",
+                (user_id, profession.strip(), city.strip() if city else None)
+            )
+            return cur.lastrowid
+    except sqlite3.IntegrityError:
+        return None
+
+def get_subscriptions(user_id):
+    """Возвращает все подписки пользователя."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM subscriptions WHERE user_id = ? ORDER BY created_at DESC",
+            (user_id,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+def delete_subscription(sub_id, user_id):
+    """Удаляет подписку по id (только свою)."""
+    with get_conn() as conn:
+        conn.execute(
+            "DELETE FROM subscriptions WHERE id = ? AND user_id = ?",
+            (sub_id, user_id)
+        )
+
+def delete_all_subscriptions(user_id):
+    """Удаляет все подписки пользователя."""
+    with get_conn() as conn:
+        conn.execute("DELETE FROM subscriptions WHERE user_id = ?", (user_id,))
+
+def find_matching_subscribers(profession, city):
+    """Возвращает user_id всех подписчиков, которым подходит вакансия.
+    Совпадение профессии — LIKE (подстрока).
+    Совпадение города — точное регистронезависимое, либо подписка без города (Любой город).
+    """
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT DISTINCT user_id FROM subscriptions
+               WHERE LOWER(?) LIKE '%' || LOWER(profession) || '%'
+                  OR LOWER(profession) LIKE '%' || LOWER(?) || '%'""",
+            (profession, profession)
+        ).fetchall()
+        # Дополнительная фильтрация по городу в Python, чтобы учесть city=NULL (любой)
+        candidate_ids = [r['user_id'] for r in rows]
+        if not candidate_ids:
+            return []
+        placeholders = ','.join('?' * len(candidate_ids))
+        filtered = conn.execute(
+            f"""SELECT DISTINCT user_id FROM subscriptions
+                WHERE user_id IN ({placeholders})
+                  AND (city IS NULL OR LOWER(city) = LOWER(?))
+                  AND (LOWER(?) LIKE '%' || LOWER(profession) || '%'
+                       OR LOWER(profession) LIKE '%' || LOWER(?) || '%')""",
+            (*candidate_ids, city if city else '', profession, profession)
+        ).fetchall()
+        return [r['user_id'] for r in filtered]

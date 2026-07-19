@@ -16,6 +16,7 @@ vacancy_temp = {}    # chat_id -> dict с данными новой ваканс
 review_states = {}   # chat_id -> {'employer_id', 'vac_id', 'rating'} — ожидание текста отзыва
 search_states = {}   # chat_id -> {'step': 'profession'|'city', 'profession': str}
 search_results = {}  # chat_id -> {'vacancies': [...], 'index': int}
+sub_states = {}      # chat_id -> {'step': 'profession'|'city', 'profession': str}
 
 STATUS_EMOJI = {'active': '🟢', 'closed': '🔴'}
 STATUS_LABEL = {'active': 'Активна', 'closed': 'Закрыта'}
@@ -66,7 +67,7 @@ def worker_menu_markup():
     markup = ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add(KeyboardButton('👤 Мои данные'), KeyboardButton('⛺ Моя вахта'))
     markup.add(KeyboardButton('💰 Зарплата'), KeyboardButton('💸 Расходы'))
-    markup.add(KeyboardButton('🔍 Найти работу'))
+    markup.add(KeyboardButton('🔍 Найти работу'), KeyboardButton('🔔 Подписка'))
     markup.add(KeyboardButton('🗑 Удалить анкету'))
     markup.add(KeyboardButton('📊 Отчёт'), KeyboardButton('❓ Помощь'))
     markup.add(KeyboardButton('🏠 Главное меню'))
@@ -207,6 +208,104 @@ def handle_search_input(message):
             parse_mode="Markdown",
             reply_markup=_vacancy_inline(vac, 1, len(found)))
 
+# ── Подписки на вакансии ──────────────────────────────────────
+
+@bot.message_handler(func=lambda m: m.text == '🔔 Подписка')
+def subscription_menu(message):
+    cid = message.chat.id
+    subs = db.get_subscriptions(cid)
+    markup = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    markup.add(KeyboardButton('➕ Новая подписка'), KeyboardButton('📋 Мои подписки'))
+    markup.add(KeyboardButton('🏠 Главное меню'))
+    count = f"У вас {len(subs)} подпис." if subs else "У вас пока нет подписок."
+    bot.send_message(cid,
+        f"🔔 *Подписки на вакансии*\n{count}\n\n"
+        "Вы будете получать уведомления, когда появятся подходящие вакансии.",
+        parse_mode="Markdown", reply_markup=markup)
+
+@bot.message_handler(func=lambda m: m.text == '➕ Новая подписка')
+def new_subscription(message):
+    cid = message.chat.id
+    sub_states[cid] = {'step': 'profession'}
+    bot.send_message(cid,
+        "🔔 *Новая подписка*\n\nВведите профессию, за вакансиями которой хотите следить:",
+        parse_mode="Markdown", reply_markup=ReplyKeyboardRemove())
+
+@bot.message_handler(func=lambda m: m.chat.id in sub_states)
+def handle_sub_input(message):
+    cid = message.chat.id
+    state = sub_states[cid]
+    text = message.text.strip()
+
+    if state['step'] == 'profession':
+        sub_states[cid] = {'step': 'city', 'profession': text}
+        markup = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+        markup.add(KeyboardButton(ANY_CITY))
+        bot.send_message(cid,
+            f"👷 Профессия: *{text}*\n\nТеперь укажите город или нажмите «{ANY_CITY}»:",
+            parse_mode="Markdown", reply_markup=markup)
+
+    elif state['step'] == 'city':
+        profession = state['profession']
+        city = None if text == ANY_CITY else text
+        sub_states.pop(cid)
+
+        sub_id = db.add_subscription(cid, profession, city)
+        city_label = city if city else "любой город"
+        if sub_id:
+            bot.send_message(cid,
+                f"✅ *Подписка создана!*\n\n"
+                f"👷 Профессия: {profession}\n"
+                f"📍 Город: {city_label}\n\n"
+                "Вы получите уведомление, как только появится подходящая вакансия.",
+                parse_mode="Markdown", reply_markup=worker_menu_markup())
+        else:
+            bot.send_message(cid,
+                f"ℹ️ Такая подписка уже существует ({profession} / {city_label}).",
+                reply_markup=worker_menu_markup())
+
+@bot.message_handler(func=lambda m: m.text == '📋 Мои подписки')
+def my_subscriptions(message):
+    cid = message.chat.id
+    subs = db.get_subscriptions(cid)
+    if not subs:
+        bot.send_message(cid, "У вас пока нет подписок.",
+                         reply_markup=worker_menu_markup())
+        return
+    bot.send_message(cid, f"📋 *Ваши подписки* ({len(subs)}):",
+                     parse_mode="Markdown")
+    for sub in subs:
+        city_label = sub['city'] if sub['city'] else "Любой город"
+        inline = InlineKeyboardMarkup()
+        inline.add(InlineKeyboardButton(
+            "🗑 Удалить", callback_data=f"del_sub:{sub['id']}"))
+        bot.send_message(cid,
+            f"👷 {sub['profession']}  📍 {city_label}",
+            reply_markup=inline)
+    inline_all = InlineKeyboardMarkup()
+    inline_all.add(InlineKeyboardButton(
+        "❌ Отключить все подписки", callback_data="del_all_subs"))
+    bot.send_message(cid, "Управление всеми подписками:",
+                     reply_markup=inline_all)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('del_sub:'))
+def handle_del_sub(call):
+    cid = call.message.chat.id
+    sub_id = int(call.data.split(':')[1])
+    db.delete_subscription(sub_id, cid)
+    bot.answer_callback_query(call.id, "🗑 Подписка удалена.")
+    bot.edit_message_reply_markup(cid, call.message.message_id, reply_markup=None)
+    bot.edit_message_text(
+        f"~~{call.message.text}~~ _(удалена)_",
+        cid, call.message.message_id, parse_mode="Markdown")
+
+@bot.callback_query_handler(func=lambda call: call.data == 'del_all_subs')
+def handle_del_all_subs(call):
+    cid = call.message.chat.id
+    db.delete_all_subscriptions(cid)
+    bot.answer_callback_query(call.id, "❌ Все подписки удалены.")
+    bot.edit_message_text("❌ Все подписки отключены.", cid, call.message.message_id)
+
 # ── Анкета работника ──────────────────────────────────────────
 
 @bot.message_handler(func=lambda m: m.text == '👤 Мои данные')
@@ -254,6 +353,9 @@ def cancel(message):
         search_states.pop(cid)
         search_results.pop(cid, None)
         bot.send_message(cid, "❌ Поиск отменён.", reply_markup=worker_menu_markup())
+    elif cid in sub_states:
+        sub_states.pop(cid)
+        bot.send_message(cid, "❌ Создание подписки отменено.", reply_markup=worker_menu_markup())
     else:
         bot.send_message(cid, "Нечего отменять.", reply_markup=main_menu_markup())
 
@@ -374,11 +476,39 @@ def handle_vacancy(message):
     else:
         vacancy_states.pop(cid)
         data = vacancy_temp.pop(cid)
-        db.add_vacancy(cid, data)
+        vac_id = db.add_vacancy(cid, data)
         lines = ["✅ *Вакансия создана!*\n"]
         for key in VAC_STEPS:
             lines.append(f"• {VAC_LABELS[key]}: {data.get(key, '—')}")
         bot.send_message(cid, "\n".join(lines), parse_mode="Markdown", reply_markup=employer_menu_markup())
+
+        # Уведомляем подписчиков
+        subscribers = db.find_matching_subscribers(
+            profession=data.get('profession', ''),
+            city=data.get('city', '')
+        )
+        if subscribers:
+            notify_text = (
+                "🔔 *Найдена новая вакансия!*\n\n"
+                f"🏢 Компания: {data.get('company', '—')}\n"
+                f"👷 Профессия: {data.get('profession', '—')}\n"
+                f"📍 Город: {data.get('city', '—')}\n"
+                f"💰 Зарплата: {data.get('salary', '—')}\n"
+                f"⛺ График: {data.get('schedule', '—')}"
+            )
+            notify_inline = InlineKeyboardMarkup(row_width=2)
+            notify_inline.add(
+                InlineKeyboardButton("📩 Откликнуться",   callback_data=f"apply:{cid}:{vac_id}"),
+                InlineKeyboardButton("⭐ Оставить отзыв", callback_data=f"review:{cid}:{vac_id}"),
+            )
+            for sub_uid in subscribers:
+                if sub_uid == cid:   # работодатель сам себе не шлёт
+                    continue
+                try:
+                    bot.send_message(sub_uid, notify_text,
+                                     parse_mode="Markdown", reply_markup=notify_inline)
+                except Exception:
+                    pass
 
 @bot.message_handler(func=lambda m: m.text == '📋 Мои вакансии')
 def my_vacancies(message):

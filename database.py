@@ -145,6 +145,30 @@ def init_db():
         if 'inn' not in cols:
             conn.execute("ALTER TABLE vacancies ADD COLUMN inn TEXT")
 
+        # Миграция: частичный уникальный индекс для вакансий без города (city IS NULL).
+        # Стандартный UNIQUE-constraint не ловит дубли, когда city=NULL, потому что
+        # в SQL NULL != NULL. Решение — отдельный частичный индекс.
+        # Перед созданием индекса удаляем уже существующие дубли (оставляем строку с MIN(id)).
+        idx_names = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='official_vacancies'"
+        ).fetchall()}
+        if 'idx_ov_no_city' not in idx_names:
+            conn.execute("""
+                DELETE FROM official_vacancies
+                WHERE city IS NULL
+                  AND id NOT IN (
+                      SELECT MIN(id)
+                      FROM official_vacancies
+                      WHERE city IS NULL
+                      GROUP BY company_name, profession, source_url
+                  )
+            """)
+            conn.execute("""
+                CREATE UNIQUE INDEX idx_ov_no_city
+                ON official_vacancies(company_name, profession, source_url)
+                WHERE city IS NULL
+            """)
+
 # ── Профили работников ────────────────────────────────────────
 
 def get_profile(chat_id):
@@ -732,11 +756,37 @@ def touch_source(source_id):
         )
 
 def save_official_vacancy(data):
-    """Сохраняет официальную вакансию, игнорируя дубль по (company_name, profession, city, source_url).
-    Возвращает id записи или None при дубле.
+    """Сохраняет официальную вакансию. Возвращает id записи или None при дубле.
+
+    Правила дедупликации:
+    - city НЕ NULL → дубль = совпадение (company_name, profession, city, source_url)
+    - city IS NULL → дубль = совпадение (company_name, profession, source_url)
+      (стандартный UNIQUE-constraint не ловит NULL=NULL, поэтому проверяем явно)
     """
+    company_name = data.get("company_name")
+    profession   = data.get("profession")
+    city         = data.get("city")
+    source_url   = data.get("source_url")
+
     try:
         with get_conn() as conn:
+            # Явная проверка дубля перед вставкой
+            if city:
+                exists = conn.execute(
+                    """SELECT id FROM official_vacancies
+                       WHERE company_name=? AND profession=? AND city=? AND source_url=?""",
+                    (company_name, profession, city, source_url),
+                ).fetchone()
+            else:
+                exists = conn.execute(
+                    """SELECT id FROM official_vacancies
+                       WHERE company_name=? AND profession=? AND city IS NULL AND source_url=?""",
+                    (company_name, profession, source_url),
+                ).fetchone()
+
+            if exists:
+                return None
+
             cur = conn.execute(
                 """INSERT INTO official_vacancies
                        (company_name, profession, city, salary, schedule,
@@ -745,18 +795,19 @@ def save_official_vacancy(data):
                        (:company_name, :profession, :city, :salary, :schedule,
                         :description, :contact, :source_url)""",
                 {
-                    "company_name": data.get("company_name"),
-                    "profession":   data.get("profession"),
-                    "city":         data.get("city"),
+                    "company_name": company_name,
+                    "profession":   profession,
+                    "city":         city,
                     "salary":       data.get("salary"),
                     "schedule":     data.get("schedule"),
                     "description":  data.get("description"),
                     "contact":      data.get("contact"),
-                    "source_url":   data.get("source_url"),
-                }
+                    "source_url":   source_url,
+                },
             )
             return cur.lastrowid
     except sqlite3.IntegrityError:
+        # Страховка: индекс БД поймал гонку или неожиданный дубль
         return None
 
 def get_official_vacancies(profession=None, city=None, limit=50):

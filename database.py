@@ -76,6 +76,17 @@ def init_db():
                 is_manual   INTEGER NOT NULL DEFAULT 0,
                 verified_at TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS complaints (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                employer_id INTEGER NOT NULL,
+                user_id     INTEGER NOT NULL,
+                reason      TEXT NOT NULL,
+                text        TEXT,
+                status      TEXT NOT NULL DEFAULT 'pending',
+                created_at  TEXT DEFAULT (datetime('now')),
+                UNIQUE(employer_id, user_id, reason)
+            );
         """)
         # Миграции: добавить колонки если таблица уже существует без них
         cols = [r[1] for r in conn.execute("PRAGMA table_info(vacancies)").fetchall()]
@@ -245,20 +256,33 @@ def get_employer_card(employer_id):
         vac_count = conn.execute(
             "SELECT COUNT(*) FROM vacancies WHERE employer_id = ?", (employer_id,)
         ).fetchone()[0]
+        active_vac_count = conn.execute(
+            "SELECT COUNT(*) FROM vacancies WHERE employer_id = ? AND status = 'active'", (employer_id,)
+        ).fetchone()[0]
         rev_row = conn.execute(
             """SELECT AVG(rating) as avg_r, COUNT(*) as cnt,
                       COUNT(DISTINCT worker_id) as unique_workers
                FROM reviews WHERE employer_id = ?""",
             (employer_id,)
         ).fetchone()
+        city_rows = conn.execute(
+            "SELECT DISTINCT city FROM vacancies WHERE employer_id = ? AND city IS NOT NULL ORDER BY city",
+            (employer_id,)
+        ).fetchall()
+        complaint_count = conn.execute(
+            "SELECT COUNT(*) FROM complaints WHERE employer_id = ? AND status = 'pending'", (employer_id,)
+        ).fetchone()[0]
     return {
-        "employer_id":    employer_id,
-        "company":        vac_row["company"]  if vac_row else "—",
-        "inn":            vac_row["inn"]       if vac_row else "—",
-        "avg_rating":     round(rev_row["avg_r"], 1) if rev_row["avg_r"] else None,
-        "review_count":   rev_row["cnt"],
-        "vacancy_count":  vac_count,
-        "unique_workers": rev_row["unique_workers"],
+        "employer_id":       employer_id,
+        "company":           vac_row["company"]  if vac_row else "—",
+        "inn":               vac_row["inn"]       if vac_row else "—",
+        "avg_rating":        round(rev_row["avg_r"], 1) if rev_row["avg_r"] else None,
+        "review_count":      rev_row["cnt"],
+        "vacancy_count":     vac_count,
+        "active_vac_count":  active_vac_count,
+        "unique_workers":    rev_row["unique_workers"],
+        "cities":            [r["city"] for r in city_rows],
+        "complaint_count":   complaint_count,
     }
 
 def get_employer_reviews_paged(employer_id, page=0, per_page=5):
@@ -323,6 +347,64 @@ def delete_all_subscriptions(user_id):
     """Удаляет все подписки пользователя."""
     with get_conn() as conn:
         conn.execute("DELETE FROM subscriptions WHERE user_id = ?", (user_id,))
+
+# ── Жалобы на работодателей ──────────────────────────────────
+
+def add_complaint(employer_id, user_id, reason, text):
+    """Добавляет жалобу. Один пользователь — одна жалоба на одного работодателя по одной причине.
+    Возвращает id новой жалобы или None если дубликат.
+    """
+    try:
+        with get_conn() as conn:
+            cur = conn.execute(
+                """INSERT INTO complaints (employer_id, user_id, reason, text)
+                   VALUES (?, ?, ?, ?)""",
+                (employer_id, user_id, reason, text)
+            )
+            return cur.lastrowid
+    except sqlite3.IntegrityError:
+        return None
+
+def count_pending_complaints():
+    """Количество необработанных жалоб (для админки)."""
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT COUNT(*) FROM complaints WHERE status = 'pending'"
+        ).fetchone()[0]
+
+def get_pending_complaints(limit=30):
+    """Список необработанных жалоб для админки."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT c.*,
+                      (SELECT company FROM vacancies
+                       WHERE employer_id = c.employer_id ORDER BY id DESC LIMIT 1) AS company
+               FROM complaints c
+               WHERE c.status = 'pending'
+               ORDER BY c.created_at DESC
+               LIMIT ?""",
+            (limit,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+def get_complaint_by_id(complaint_id):
+    """Одна жалоба по id."""
+    with get_conn() as conn:
+        row = conn.execute(
+            """SELECT c.*,
+                      (SELECT company FROM vacancies
+                       WHERE employer_id = c.employer_id ORDER BY id DESC LIMIT 1) AS company
+               FROM complaints c WHERE c.id = ?""",
+            (complaint_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+def resolve_complaint(complaint_id):
+    """Помечает жалобу как рассмотренную."""
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE complaints SET status = 'resolved' WHERE id = ?", (complaint_id,)
+        )
 
 # ── Статусы работодателей ────────────────────────────────────
 

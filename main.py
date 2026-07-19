@@ -57,6 +57,7 @@ review_states = PersistentDict('review_states')  # chat_id -> {'employer_id', 'v
 search_states = PersistentDict('search_states')  # chat_id -> {'step': ..., 'profession': ...}
 search_results = PersistentDict('search_results')  # chat_id -> {'vacancies': [...], 'index': int}
 sub_states = PersistentDict('sub_states')        # chat_id -> {'step': ..., 'profession': ...}
+complaint_states = PersistentDict('complaint_states')  # chat_id -> {'employer_id', 'reason'}
 
 STATUS_EMOJI = {'active': '🟢', 'closed': '🔴'}
 STATUS_LABEL = {'active': 'Активна', 'closed': 'Закрыта'}
@@ -74,6 +75,13 @@ EMP_STATUS_LABEL = {
 }
 EMP_STATUS_WARNING = {
     'complaints': '⚠️ Перед трудоустройством изучите отзывы.',
+}
+
+COMPLAINT_REASONS = {
+    'salary':     '💰 Задержка зарплаты',
+    'mismatch':   '❌ Вакансия не соответствует описанию',
+    'conditions': '🏚 Плохие условия труда',
+    'other':      '📉 Другая проблема',
 }
 
 ANY_CITY = '🌍 Любой город'
@@ -216,7 +224,7 @@ def _vacancy_inline(vac, index, total):
         InlineKeyboardButton("📩 Откликнуться",   callback_data=f"apply:{vac['employer_id']}:{vac['id']}"),
         InlineKeyboardButton("⭐ Оставить отзыв", callback_data=f"review:{vac['employer_id']}:{vac['id']}"),
     )
-    markup.add(InlineKeyboardButton("🏢 Работодатель", callback_data=f"employer_card:{vac['employer_id']}"))
+    markup.add(InlineKeyboardButton("🏢 О работодателе", callback_data=f"employer_card:{vac['employer_id']}"))
     if index < total:
         markup.add(InlineKeyboardButton("➡ Следующая вакансия", callback_data="next_vac"))
     return markup
@@ -506,13 +514,17 @@ def admin_panel(message):
     if message.chat.id != ADMIN_ID:
         bot.send_message(message.chat.id, "🚫 Нет доступа.")
         return
-    inline = InlineKeyboardMarkup()
+    pending = db.count_pending_complaints()
+    complaints_label = f"📋 Жалобы ({pending} новых)" if pending else "📋 Жалобы"
+    inline = InlineKeyboardMarkup(row_width=1)
     inline.add(InlineKeyboardButton("👷 Статусы работодателей", callback_data="admin_emp_list"))
+    inline.add(InlineKeyboardButton(complaints_label, callback_data="admin_complaints"))
     bot.send_message(message.chat.id,
         f"👨‍💼 *Админ панель*\n\n"
         f"👥 Пользователей в БД: {db.count_users()}\n"
         f"📋 Заполненных анкет: {db.count_filled_profiles()}\n"
-        f"📌 Вакансий: {db.count_vacancies()}",
+        f"📌 Вакансий: {db.count_vacancies()}\n"
+        f"⚠️ Жалоб на рассмотрении: {pending}",
         parse_mode="Markdown",
         reply_markup=inline)
 
@@ -676,16 +688,20 @@ def _employer_card_text(card):
     emp_st = db.get_employer_status(card['employer_id'])
     status_label = EMP_STATUS_LABEL.get(emp_st['status'], '🟡 Новый')
     manual_mark = " _(вручную)_" if emp_st['is_manual'] else ""
+    cities_str = ", ".join(card.get('cities', [])) or "—"
     lines = [
         "🏢 *Карточка работодателя*\n",
         f"🏢 Компания: *{card['company']}*",
         f"🆔 ИНН: {card['inn'] or '—'}",
+        f"📍 Города/объекты: {cities_str}",
         f"📊 Статус: {status_label}{manual_mark}",
         f"⭐ Средний рейтинг: {rating_str}",
         f"💬 Отзывов: {card['review_count']}",
-        f"📋 Вакансий: {card['vacancy_count']}",
+        f"📋 Активных вакансий: {card.get('active_vac_count', 0)} / всего {card['vacancy_count']}",
         f"👥 Сотрудников оставили отзыв: {card['unique_workers']}",
     ]
+    if card.get('complaint_count', 0) > 0:
+        lines.append(f"⚠️ Жалоб на рассмотрении: {card['complaint_count']}")
     if emp_st['status'] == 'complaints':
         lines.append(
             "\n⚠️ *У работодателя есть жалобы.*\n"
@@ -702,10 +718,12 @@ def handle_employer_card(call):
     bot.answer_callback_query(call.id)
     card = db.get_employer_card(employer_id)
     text = _employer_card_text(card)
-    inline = InlineKeyboardMarkup()
+    inline = InlineKeyboardMarkup(row_width=1)
     if card['review_count'] > 0:
         inline.add(InlineKeyboardButton(
             "📖 Все отзывы", callback_data=f"emp_reviews:{employer_id}:0"))
+    inline.add(InlineKeyboardButton(
+        "⚠️ Пожаловаться на работодателя", callback_data=f"complaint:{employer_id}"))
     bot.send_message(cid, text, parse_mode="Markdown", reply_markup=inline)
 
 REVIEWS_PER_PAGE = 5
@@ -989,6 +1007,119 @@ def handle_toggle_vac(call):
 @bot.message_handler(func=lambda m: m.text == '👥 Найти работников')
 def find_workers(message):
     bot.send_message(message.chat.id, "👥 Раздел поиска работников — скоро будет доступен.")
+
+# ── Жалобы на работодателей ───────────────────────────────────
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('complaint:'))
+def handle_complaint_start(call):
+    cid = call.message.chat.id
+    employer_id = int(call.data.split(':')[1])
+    bot.answer_callback_query(call.id)
+    inline = InlineKeyboardMarkup(row_width=1)
+    for key, label in COMPLAINT_REASONS.items():
+        inline.add(InlineKeyboardButton(label, callback_data=f"cmp_reason:{employer_id}:{key}"))
+    bot.send_message(cid,
+        "⚠️ *Жалоба на работодателя*\n\nВыберите причину жалобы:",
+        parse_mode="Markdown", reply_markup=inline)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('cmp_reason:'))
+def handle_complaint_reason(call):
+    cid = call.message.chat.id
+    parts = call.data.split(':')
+    employer_id = int(parts[1])
+    reason_key  = parts[2]
+    if reason_key not in COMPLAINT_REASONS:
+        bot.answer_callback_query(call.id, "Неверная причина.")
+        return
+    bot.answer_callback_query(call.id)
+    complaint_states[cid] = {'employer_id': employer_id, 'reason': reason_key}
+    reason_label = COMPLAINT_REASONS[reason_key]
+    bot.send_message(cid,
+        f"📝 Причина: *{reason_label}*\n\n"
+        "Опишите ситуацию подробнее (или отправьте /skip_complaint чтобы пропустить):",
+        parse_mode="Markdown")
+
+@bot.message_handler(commands=['skip_complaint'])
+def handle_complaint_skip(message):
+    cid = message.chat.id
+    if cid not in complaint_states:
+        return
+    state = complaint_states.pop(cid)
+    _save_complaint(cid, state, text=None)
+
+@bot.message_handler(func=lambda m: m.chat.id in complaint_states)
+def handle_complaint_text(message):
+    cid = message.chat.id
+    state = complaint_states.pop(cid)
+    _save_complaint(cid, state, text=message.text.strip())
+
+def _save_complaint(user_id, state, text):
+    employer_id = state['employer_id']
+    reason_key  = state['reason']
+    result = db.add_complaint(employer_id, user_id, reason_key, text)
+    if result:
+        reason_label = COMPLAINT_REASONS.get(reason_key, reason_key)
+        bot.send_message(user_id,
+            f"✅ *Жалоба принята*\n\n"
+            f"Причина: {reason_label}\n"
+            "Администратор рассмотрит её в ближайшее время. Спасибо за обратную связь.",
+            parse_mode="Markdown")
+        # Уведомляем администратора если ADMIN_ID задан
+        if ADMIN_ID:
+            try:
+                bot.send_message(ADMIN_ID,
+                    f"⚠️ *Новая жалоба!*\n"
+                    f"Причина: {reason_label}\n"
+                    f"Работодатель ID: {employer_id}",
+                    parse_mode="Markdown")
+            except Exception:
+                pass
+    else:
+        bot.send_message(user_id,
+            "ℹ️ Вы уже подавали жалобу по этой причине на данного работодателя.")
+
+# ── Админ: жалобы ─────────────────────────────────────────────
+
+@bot.callback_query_handler(func=lambda call: call.data == 'admin_complaints')
+def admin_complaints_list(call):
+    if not _is_admin(call.message.chat.id):
+        bot.answer_callback_query(call.id, "🚫 Нет доступа.")
+        return
+    bot.answer_callback_query(call.id)
+    complaints = db.get_pending_complaints()
+    if not complaints:
+        bot.send_message(call.message.chat.id, "✅ Новых жалоб нет.")
+        return
+    bot.send_message(call.message.chat.id,
+        f"⚠️ *Жалобы на рассмотрении* ({len(complaints)}):",
+        parse_mode="Markdown")
+    for c in complaints:
+        reason_label = COMPLAINT_REASONS.get(c['reason'], c['reason'])
+        date = (c.get('created_at') or '')[:10]
+        text_preview = (c.get('text') or '_без описания_')[:120]
+        msg = (
+            f"🏢 *{c.get('company') or '—'}*\n"
+            f"📌 Причина: {reason_label}\n"
+            f"📅 Дата: {date}\n"
+            f"💬 {text_preview}"
+        )
+        inline = InlineKeyboardMarkup()
+        inline.add(InlineKeyboardButton(
+            "✅ Отметить рассмотренной", callback_data=f"admin_cmp_resolve:{c['id']}"))
+        bot.send_message(call.message.chat.id, msg, parse_mode="Markdown", reply_markup=inline)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('admin_cmp_resolve:'))
+def admin_complaint_resolve(call):
+    if not _is_admin(call.message.chat.id):
+        bot.answer_callback_query(call.id, "🚫 Нет доступа.")
+        return
+    complaint_id = int(call.data.split(':')[1])
+    db.resolve_complaint(complaint_id)
+    bot.answer_callback_query(call.id, "✅ Жалоба отмечена как рассмотренная.")
+    bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=None)
+    bot.edit_message_text(
+        call.message.text + "\n\n✅ _Рассмотрена_",
+        call.message.chat.id, call.message.message_id, parse_mode="Markdown")
 
 # ── Прочие разделы ────────────────────────────────────────────
 
